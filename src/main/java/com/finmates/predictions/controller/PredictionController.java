@@ -31,36 +31,34 @@ public class PredictionController {
     public ResponseEntity<Map<String, Object>> getPredictedPriceRange(
             @RequestParam(defaultValue = "24") int hoursAhead) {
 
-        try {
-            List<PriceData> historicalData = uniswapDataService.getHistoricalData(30);
+        long startTime = System.currentTimeMillis();
 
-            if (historicalData.isEmpty()) {
-                throw new RuntimeException("No historical data available");
+        try {
+            if (predictionService.needsRetraining()) {
+                List<PriceData> historicalData = uniswapDataService.getHistoricalData(30);
+                if (historicalData.isEmpty()) {
+                    throw new RuntimeException("No historical data available");
+                }
+                predictionService.trainModel(historicalData);
             }
 
-            predictionService.trainModel(historicalData);
             PriceRange priceRange = predictionService.predictPriceRange(hoursAhead);
 
-            Map<String, Object> response = new HashMap<>();
-
-            // Add metadata about the prediction
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("dataSource", uniswapDataService.isUsingSimulatedData() ? "simulated" : "real");
-            metadata.put("dataPoints", historicalData.size());
             metadata.put("predictionHorizon", hoursAhead);
             metadata.put("timestamp", System.currentTimeMillis());
-            metadata.put("formattedTimestamp",
-                    Instant.now().atZone(ZoneId.systemDefault())
+            metadata.put("processingTimeMs", System.currentTimeMillis() - startTime);
+            metadata.put("lastTrainingTime",
+                    Instant.ofEpochSecond(predictionService.getLastTrainingTime())
+                            .atZone(ZoneId.systemDefault())
                             .format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
 
-            // Add prediction results
             Map<String, Object> prediction = new HashMap<>();
             prediction.put("priceRange", priceRange);
-            prediction.put("modelQuality", predictionService.getRSquared());
-            prediction.put("currentVolatility", predictionService.getVolatility());
-            prediction.put("meanPrice", predictionService.getMeanPrice());
+            prediction.putAll(predictionService.getModelMetrics());
 
-            // Combine everything in the response
+            Map<String, Object> response = new HashMap<>();
             response.put("metadata", metadata);
             response.put("prediction", prediction);
 
@@ -72,8 +70,20 @@ public class PredictionController {
             errorResponse.put("error", "Failed to generate price prediction");
             errorResponse.put("message", e.getMessage());
             errorResponse.put("timestamp", System.currentTimeMillis());
-            errorResponse.put("dataSource", "error");
+            errorResponse.put("processingTimeMs", System.currentTimeMillis() - startTime);
             return ResponseEntity.internalServerError().body(errorResponse);
         }
     }
+
+
+    @GetMapping("/model-metrics")
+    public ResponseEntity<Map<String, Object>> getModelMetrics() {
+        return ResponseEntity.ok(predictionService.getModelMetrics());
+    }
+
+    @GetMapping("/prediction-quality")
+    public ResponseEntity<Map<String, Double>> getPredictionQuality() {
+        return ResponseEntity.ok(predictionService.getPredictionQualityMetrics());
+    }
+
 }
