@@ -214,7 +214,7 @@ public class BlockchainService {
 
 
             // Adjust for decimal places
-            int decimalAdjustment = quoteTokenDecimals - baseTokenDecimals;
+            int decimalAdjustment = Math.abs(quoteTokenDecimals - baseTokenDecimals);
 
             log.debug("Base token decimals: {}", baseTokenDecimals);
             log.debug("Quote token decimals: {}", quoteTokenDecimals);
