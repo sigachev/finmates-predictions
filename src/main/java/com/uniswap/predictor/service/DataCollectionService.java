@@ -7,7 +7,6 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,21 +16,21 @@ import java.util.concurrent.ExecutionException;
 @Service
 public class DataCollectionService {
 
-    private final com.uniswap.predictor.service.BlockchainService blockchainService;
+    private final BlockchainService blockchainService;
     private final GraphQLService graphQLService;
 
     @Autowired
-    public DataCollectionService(com.uniswap.predictor.service.BlockchainService blockchainService, GraphQLService graphQLService) {
+    public DataCollectionService(BlockchainService blockchainService, GraphQLService graphQLService) {
         this.blockchainService = blockchainService;
         this.graphQLService = graphQLService;
     }
 
     public PoolDataPoint getCurrentPoolData(String poolAddress) {
         try {
-            com.uniswap.predictor.service.BlockchainService.PoolState poolState = blockchainService.getPoolState(poolAddress);
+            BlockchainService.PoolState poolState = blockchainService.getPoolState(poolAddress);
 
-            double token0Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), true);
-            double token1Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), false);
+            double token0Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), poolAddress, true);
+            double token1Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), poolAddress, false);
 
             // Get recent volumes and fees in parallel
             CompletableFuture<Double> volume24hFuture = CompletableFuture.supplyAsync(() ->
@@ -79,35 +78,39 @@ public class DataCollectionService {
         );
 
         // Combine and process events into a coherent time series
-        processHistoricalEvents(historicalData, swapEvents, liquidityEvents);
+        processHistoricalEvents(historicalData, swapEvents, liquidityEvents, poolAddress);
 
         return historicalData;
     }
 
     private void processHistoricalEvents(List<PoolDataPoint> result,
-                                         List<GraphQLService.SwapEvent> swapEvents,
-                                         List<GraphQLService.LiquidityEvent> liquidityEvents) {
+                                       List<GraphQLService.SwapEvent> swapEvents,
+                                       List<GraphQLService.LiquidityEvent> liquidityEvents,
+                                       String poolAddress) {
         // Process events chronologically and build a time series
-        // (Simplified implementation - a real system would need more sophisticated processing)
-
-        // For demonstration, we'll just convert swap events to data points
         for (GraphQLService.SwapEvent swap : swapEvents) {
+            double token0Price = blockchainService.calculatePrice(
+                    swap.getSqrtPriceX96().toBigInteger(), 
+                    poolAddress, 
+                    true
+            );
+            
+            double token1Price = blockchainService.calculatePrice(
+                    swap.getSqrtPriceX96().toBigInteger(), 
+                    poolAddress, 
+                    false
+            );
+
             PoolDataPoint dataPoint = PoolDataPoint.builder()
                     .timestamp(Instant.ofEpochSecond(swap.getTimestamp()))
                     .sqrtPriceX96(swap.getSqrtPriceX96())
                     .tick(swap.getTick())
-                    .token0Price(calculatePrice(swap.getSqrtPriceX96()))
-                    .token1Price(BigDecimal.ONE.divide(calculatePrice(swap.getSqrtPriceX96()), 18, BigDecimal.ROUND_HALF_UP))
+                    .token0Price(BigDecimal.valueOf(token0Price))
+                    .token1Price(BigDecimal.valueOf(token1Price))
                     .liquidity(swap.getLiquidity())
                     .build();
 
             result.add(dataPoint);
         }
-    }
-
-    private BigDecimal calculatePrice(BigDecimal sqrtPriceX96) {
-        BigDecimal q96 = new BigDecimal(BigInteger.ONE.shiftLeft(96));
-        BigDecimal sqrtPrice = sqrtPriceX96.divide(q96, 18, BigDecimal.ROUND_HALF_UP);
-        return sqrtPrice.multiply(sqrtPrice);
     }
 }

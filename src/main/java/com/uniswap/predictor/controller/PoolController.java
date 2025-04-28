@@ -1,6 +1,6 @@
 package com.uniswap.predictor.controller;
 
-import com.uniswap.predictor.model.dto.PoolDataPoint;
+import com.uniswap.predictor.dto.PoolDataPoint;
 import com.uniswap.predictor.service.BlockchainService;
 import com.uniswap.predictor.service.DataCollectionService;
 import com.uniswap.predictor.service.PredictionService;

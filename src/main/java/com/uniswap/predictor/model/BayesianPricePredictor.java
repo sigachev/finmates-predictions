@@ -1,10 +1,28 @@
-import com.uniswap.predictor.model.dto.PoolDataPoint;
+package com.uniswap.predictor.model;
+
+import com.uniswap.predictor.dto.PoolDataPoint;
+import org.deeplearning4j.nn.api.OptimizationAlgorithm;
+import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
+import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
+import org.deeplearning4j.nn.conf.layers.DenseLayer;
+import org.deeplearning4j.nn.conf.layers.OutputLayer;
+import org.deeplearning4j.nn.graph.ComputationGraph;
+import org.deeplearning4j.nn.weights.WeightInit;
+import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
+import org.nd4j.linalg.activations.Activation;
+import org.nd4j.linalg.api.ndarray.INDArray;
+import org.nd4j.linalg.dataset.DataSet;
+import org.nd4j.linalg.factory.Nd4j;
+import org.nd4j.linalg.learning.config.Adam;
+import org.nd4j.linalg.lossfunctions.LossFunctions;
+import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Component
 public class BayesianPricePredictor {
 
     private ComputationGraph network;
@@ -21,52 +39,18 @@ public class BayesianPricePredictor {
     private final double MC_DROPOUT_RATE = 0.2; // Dropout rate for Monte Carlo sampling
     private final int MC_SAMPLES = 100;        // Number of Monte Carlo samples for uncertainty
 
-    public BayesianPricePredictor() {
-        buildModel();
+    // Add getter method
+    public int getNumEpochs() {
+        return NUM_EPOCHS;
     }
 
-    private void buildModel() {
-        // Create a Bayesian Neural Network with LSTM for sequence modeling
-        // and variational layers for uncertainty quantification
-
-        ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
-                .seed(12345)
-                .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
-                .updater(new Adam(LEARNING_RATE))
-                .weightInit(WeightInit.XAVIER)
-                .graphBuilder()
-                .addInputs("input")
-                .addLayer("lstm1", new LSTM.Builder()
-                        .nIn(NUM_FEATURES)
-                        .nOut(HIDDEN_LAYER_SIZE)
-                        .activation(Activation.TANH)
-                        .build(), "input")
-                .addLayer("dropout1", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
-                        .build(), "lstm1")
-                .addLayer("dense1", new DenseLayer.Builder()
-                        .nIn(HIDDEN_LAYER_SIZE)
-                        .nOut(HIDDEN_LAYER_SIZE)
-                        .activation(Activation.RELU)
-                        .build(), "dropout1")
-                .addLayer("dropout2", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
-                        .build(), "dense1")
-                .addLayer("output", new OutputLayer.Builder(LossFunctions.LossFunction.MSE)
-                        .nIn(HIDDEN_LAYER_SIZE)
-                        .nOut(NUM_OUTPUTS)
-                        .activation(Activation.IDENTITY)
-                        .build(), "dropout2")
-                .setOutputs("output")
-                .backpropType(BackpropType.TruncatedBPTT)
-                .tBPTTForwardLength(SEQUENCE_LENGTH)
-                .tBPTTBackwardLength(SEQUENCE_LENGTH)
-                .build();
-
-        network = new ComputationGraph(conf);
-        network.init();
-        network.setListeners(new ScoreIterationListener(10));
+    // Add this to BayesianPricePredictor.java
+    public interface TrainingProgressCallback {
+        void onProgress(int epoch, int totalEpochs, double score);
     }
 
-    public void train(List<PoolDataPoint> historicalData) {
+    // Then add this overloaded train method
+    public void train(List<PoolDataPoint> historicalData, TrainingProgressCallback progressCallback) {
         if (historicalData.size() < SEQUENCE_LENGTH) {
             throw new IllegalArgumentException("Not enough historical data for training");
         }
@@ -76,10 +60,70 @@ public class BayesianPricePredictor {
 
         // Train the model
         for (int epoch = 0; epoch < NUM_EPOCHS; epoch++) {
+            double epochScore = 0.0;
+            int batchCount = 0;
+
             for (DataSet dataSet : trainingSets) {
                 network.fit(dataSet);
+                epochScore += network.score();
+                batchCount++;
+            }
+
+            // Calculate average score for this epoch
+            double avgScore = batchCount > 0 ? epochScore / batchCount : 0.0;
+
+            // Report progress if callback is provided
+            if (progressCallback != null) {
+                progressCallback.onProgress(epoch, NUM_EPOCHS, avgScore);
             }
         }
+    }
+
+    public BayesianPricePredictor() {
+        buildModel();
+    }
+
+    private void buildModel() {
+        // Create a simpler model without LSTM for initial testing
+        ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
+                .seed(12345)
+                .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
+                .updater(new Adam(LEARNING_RATE))
+                .weightInit(WeightInit.XAVIER)
+                .graphBuilder()
+                .addInputs("input")
+                // Use a regular feed-forward network instead
+                .addLayer("dense1", new DenseLayer.Builder()
+                        .nIn(NUM_FEATURES)
+                        .nOut(HIDDEN_LAYER_SIZE)
+                        .activation(Activation.RELU)
+                        .build(), "input")
+                .addLayer("dropout1", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
+                        .build(), "dense1")
+                .addLayer("dense2", new DenseLayer.Builder()
+                        .nIn(HIDDEN_LAYER_SIZE)
+                        .nOut(HIDDEN_LAYER_SIZE)
+                        .activation(Activation.RELU)
+                        .build(), "dropout1")
+                .addLayer("dropout2", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
+                        .build(), "dense2")
+                .addLayer("output", new OutputLayer.Builder(LossFunctions.LossFunction.MSE)
+                        .nIn(HIDDEN_LAYER_SIZE)
+                        .nOut(NUM_OUTPUTS)
+                        .activation(Activation.IDENTITY)
+                        .build(), "dropout2")
+                .setOutputs("output")
+                .build();
+
+        network = new ComputationGraph(conf);
+        network.init();
+        network.setListeners(new ScoreIterationListener(10));
+    }
+
+
+    // Original train method for backward compatibility
+    public void train(List<PoolDataPoint> historicalData) {
+        train(historicalData, null);
     }
 
     private List<DataSet> prepareTrainingData(List<PoolDataPoint> historicalData) {
@@ -93,24 +137,22 @@ public class BayesianPricePredictor {
         // Normalize features
         normalizeFeatures(features);
 
-        // Create sliding windows of data for sequence prediction
-        for (int i = 0; i < features.size() - SEQUENCE_LENGTH * 2; i++) {
-            // Input sequence
-            List<double[]> inputSequence = features.subList(i, i + SEQUENCE_LENGTH);
+        // For a feed-forward network, we want to predict the next data point
+        for (int i = 0; i < features.size() - SEQUENCE_LENGTH; i++) {
+            // Input features (current state)
+            double[] input = features.get(i);
 
-            // Target sequence (predict 24h ahead)
-            List<double[]> targetSequence = features.subList(i + SEQUENCE_LENGTH, i + SEQUENCE_LENGTH * 2);
+            // Target sequence (future values to predict)
+            List<double[]> targetSequence = features.subList(i + 1, Math.min(i + SEQUENCE_LENGTH, features.size()));
 
-            // Create input array
-            INDArray input = Nd4j.create(1, NUM_FEATURES, SEQUENCE_LENGTH);
-            for (int j = 0; j < SEQUENCE_LENGTH; j++) {
-                for (int k = 0; k < NUM_FEATURES; k++) {
-                    input.putScalar(new int[]{0, k, j}, inputSequence.get(j)[k]);
-                }
+            // Create input array for a feed-forward network - shape [1, NUM_FEATURES]
+            INDArray inputArray = Nd4j.create(1, NUM_FEATURES);
+            for (int k = 0; k < NUM_FEATURES; k++) {
+                inputArray.putScalar(new int[]{0, k}, input[k]);
             }
 
-            // Create output array - we want to predict price range (min/max)
-            INDArray labels = Nd4j.create(1, NUM_OUTPUTS, 1);
+            // Create output array - shape [1, NUM_OUTPUTS]
+            INDArray labels = Nd4j.create(1, NUM_OUTPUTS);
 
             // Find min and max prices in the target sequence
             double minPrice = Double.MAX_VALUE;
@@ -127,12 +169,12 @@ public class BayesianPricePredictor {
             double lowerStd = volatility * 0.5;
             double upperStd = volatility * 0.5;
 
-            labels.putScalar(new int[]{0, 0, 0}, normalizeValue(minPrice, 0));
-            labels.putScalar(new int[]{0, 1, 0}, lowerStd);
-            labels.putScalar(new int[]{0, 2, 0}, normalizeValue(maxPrice, 0));
-            labels.putScalar(new int[]{0, 3, 0}, upperStd);
+            labels.putScalar(new int[]{0, 0}, normalizeValue(minPrice, 0));
+            labels.putScalar(new int[]{0, 1}, lowerStd);
+            labels.putScalar(new int[]{0, 2}, normalizeValue(maxPrice, 0));
+            labels.putScalar(new int[]{0, 3}, upperStd);
 
-            result.add(new DataSet(input, labels));
+            result.add(new DataSet(inputArray, labels));
         }
 
         return result;
@@ -263,17 +305,13 @@ public class BayesianPricePredictor {
             normalizedFeatures[i] = (features[i] - featuresMin[i]) / (featuresMax[i] - featuresMin[i]);
         }
 
-        // Create input for the model - use the same current value for entire sequence
-        // (in production we'd use actual historical data)
-        INDArray input = Nd4j.create(1, NUM_FEATURES, SEQUENCE_LENGTH);
-        for (int j = 0; j < SEQUENCE_LENGTH; j++) {
-            for (int k = 0; k < NUM_FEATURES; k++) {
-                input.putScalar(new int[]{0, k, j}, normalizedFeatures[k]);
-            }
+        // For feed-forward network, create a 2D input array [1, NUM_FEATURES]
+        INDArray input = Nd4j.create(1, NUM_FEATURES);
+        for (int k = 0; k < NUM_FEATURES; k++) {
+            input.putScalar(new int[]{0, k}, normalizedFeatures[k]);
         }
 
         // Monte Carlo sampling with dropout for uncertainty estimation
-        // We'll collect multiple predictions with dropout enabled during inference
         List<INDArray> mcSamples = new ArrayList<>();
 
         for (int i = 0; i < MC_SAMPLES; i++) {
@@ -282,6 +320,7 @@ public class BayesianPricePredictor {
             mcSamples.add(output);
         }
 
+        // Rest of the method remains the same...
         // Calculate mean and variance from MC samples
         double[] means = new double[NUM_OUTPUTS];
         double[] variances = new double[NUM_OUTPUTS];
@@ -295,7 +334,7 @@ public class BayesianPricePredictor {
         // Calculate means
         for (INDArray sample : mcSamples) {
             for (int i = 0; i < NUM_OUTPUTS; i++) {
-                means[i] += sample.getDouble(0, i, 0);
+                means[i] += sample.getDouble(0, i);
             }
         }
 
@@ -306,7 +345,7 @@ public class BayesianPricePredictor {
         // Calculate variances
         for (INDArray sample : mcSamples) {
             for (int i = 0; i < NUM_OUTPUTS; i++) {
-                double diff = sample.getDouble(0, i, 0) - means[i];
+                double diff = sample.getDouble(0, i) - means[i];
                 variances[i] += diff * diff;
             }
         }
@@ -322,7 +361,6 @@ public class BayesianPricePredictor {
         double upperBoundStd = Math.sqrt(variances[2] + Math.pow(means[3], 2)); // Total uncertainty
 
         // Apply confidence interval based on normal distribution
-        // z-score for the given confidence level
         double z = getZScore(confidenceLevel);
 
         // Calculate price range with confidence interval
@@ -375,10 +413,27 @@ public class BayesianPricePredictor {
             this.confidenceLevel = confidenceLevel;
         }
 
-        public BigDecimal getLowerBound() { return lowerBound; }
-        public BigDecimal getUpperBound() { return upperBound; }
-        public BigDecimal getMedian() { return median; }
-        public BigDecimal getStandardDeviation() { return standardDeviation; }
-        public double getConfidenceLevel() { return confidenceLevel; }
+        public BigDecimal getLowerBound() {
+            return lowerBound;
+        }
+
+        public BigDecimal getUpperBound() {
+            return upperBound;
+        }
+
+        public BigDecimal getMedian() {
+            return median;
+        }
+
+        public BigDecimal getStandardDeviation() {
+            return standardDeviation;
+        }
+
+        public double getConfidenceLevel() {
+            return confidenceLevel;
+        }
     }
+
+
+
 }

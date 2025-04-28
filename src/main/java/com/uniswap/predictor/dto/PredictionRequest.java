@@ -1,4 +1,4 @@
-package com.uniswap.predictor.model.dto;
+package com.uniswap.predictor.dto;
 
 import lombok.Data;
 

@@ -1,8 +1,13 @@
-import com.uniswap.predictor.model.dto.PredictionRequest;
-import com.uniswap.predictor.model.dto.PredictionResponse;
+package com.uniswap.predictor.controller;
+
+import com.uniswap.predictor.dto.PredictionRequest;
+import com.uniswap.predictor.dto.PredictionResponse;
+import com.uniswap.predictor.service.PredictionService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/prediction")
@@ -60,4 +65,13 @@ public class PredictionController {
             return ResponseEntity.ok("Model retraining started for default pool");
         }
     }
+
+
+    @GetMapping("/progress/{poolAddress}")
+    public ResponseEntity<Map<String, Object>> getTrainingProgressDetails(@PathVariable String poolAddress) {
+        Map<String, Object> progressDetails = predictionService.getTrainingProgressDetails(poolAddress);
+        return ResponseEntity.ok(progressDetails);
+    }
+
+
 }
