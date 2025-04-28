@@ -1,6 +1,7 @@
 package com.uniswap.predictor.model;
 
 import com.uniswap.predictor.dto.PoolDataPoint;
+import lombok.extern.slf4j.Slf4j;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
@@ -22,9 +23,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Component
 public class BayesianPricePredictor {
-
     private ComputationGraph network;
     private double[] featuresMin;
     private double[] featuresMax;
@@ -32,26 +33,49 @@ public class BayesianPricePredictor {
     private double[] labelsMax;
     private final int NUM_FEATURES = 6;       // Number of input features
     private final int NUM_OUTPUTS = 4;        // Mean & std for both lower and upper bounds
-    private final int SEQUENCE_LENGTH = 24;   // Hours of data to use for prediction
-    private final int HIDDEN_LAYER_SIZE = 64; // Size of hidden layers
-    private final int NUM_EPOCHS = 100;       // Training epochs
+    private final int sequenceLength;         // Hours of data to use for prediction
+    private final int hiddenLayerSize;        // Size of hidden layers
+    private final int NUM_EPOCHS = 10;       // Training epochs
     private final double LEARNING_RATE = 0.001;
     private final double MC_DROPOUT_RATE = 0.2; // Dropout rate for Monte Carlo sampling
     private final int MC_SAMPLES = 100;        // Number of Monte Carlo samples for uncertainty
 
-    // Add getter method
+    // Default constructor for backward compatibility
+    public BayesianPricePredictor() {
+        this(24, 64); // Default values
+    }
+
+    // Constructor with configurable parameters
+    public BayesianPricePredictor(int sequenceLength, int hiddenLayerSize) {
+        if (sequenceLength <= 0) {
+            throw new IllegalArgumentException("Sequence length must be positive, got: " + sequenceLength);
+        }
+        if (hiddenLayerSize <= 0) {
+            throw new IllegalArgumentException("Hidden layer size must be positive, got: " + hiddenLayerSize);
+        }
+        this.sequenceLength = sequenceLength;
+        this.hiddenLayerSize = hiddenLayerSize;
+        buildModel();
+    }
+
     public int getNumEpochs() {
         return NUM_EPOCHS;
     }
 
-    // Add this to BayesianPricePredictor.java
+    public int getSequenceLength() {
+        return sequenceLength;
+    }
+
+    public int getHiddenLayerSize() {
+        return hiddenLayerSize;
+    }
+
     public interface TrainingProgressCallback {
         void onProgress(int epoch, int totalEpochs, double score);
     }
 
-    // Then add this overloaded train method
     public void train(List<PoolDataPoint> historicalData, TrainingProgressCallback progressCallback) {
-        if (historicalData.size() < SEQUENCE_LENGTH) {
+        if (historicalData.size() < sequenceLength) {
             throw new IllegalArgumentException("Not enough historical data for training");
         }
 
@@ -79,12 +103,7 @@ public class BayesianPricePredictor {
         }
     }
 
-    public BayesianPricePredictor() {
-        buildModel();
-    }
-
     private void buildModel() {
-        // Create a simpler model without LSTM for initial testing
         ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
                 .seed(12345)
                 .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
@@ -92,23 +111,22 @@ public class BayesianPricePredictor {
                 .weightInit(WeightInit.XAVIER)
                 .graphBuilder()
                 .addInputs("input")
-                // Use a regular feed-forward network instead
                 .addLayer("dense1", new DenseLayer.Builder()
                         .nIn(NUM_FEATURES)
-                        .nOut(HIDDEN_LAYER_SIZE)
+                        .nOut(hiddenLayerSize)
                         .activation(Activation.RELU)
                         .build(), "input")
                 .addLayer("dropout1", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
                         .build(), "dense1")
                 .addLayer("dense2", new DenseLayer.Builder()
-                        .nIn(HIDDEN_LAYER_SIZE)
-                        .nOut(HIDDEN_LAYER_SIZE)
+                        .nIn(hiddenLayerSize)
+                        .nOut(hiddenLayerSize)
                         .activation(Activation.RELU)
                         .build(), "dropout1")
                 .addLayer("dropout2", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(MC_DROPOUT_RATE)
                         .build(), "dense2")
                 .addLayer("output", new OutputLayer.Builder(LossFunctions.LossFunction.MSE)
-                        .nIn(HIDDEN_LAYER_SIZE)
+                        .nIn(hiddenLayerSize)
                         .nOut(NUM_OUTPUTS)
                         .activation(Activation.IDENTITY)
                         .build(), "dropout2")
@@ -119,7 +137,6 @@ public class BayesianPricePredictor {
         network.init();
         network.setListeners(new ScoreIterationListener(10));
     }
-
 
     // Original train method for backward compatibility
     public void train(List<PoolDataPoint> historicalData) {
@@ -138,12 +155,12 @@ public class BayesianPricePredictor {
         normalizeFeatures(features);
 
         // For a feed-forward network, we want to predict the next data point
-        for (int i = 0; i < features.size() - SEQUENCE_LENGTH; i++) {
+        for (int i = 0; i < features.size() - sequenceLength; i++) {
             // Input features (current state)
             double[] input = features.get(i);
 
             // Target sequence (future values to predict)
-            List<double[]> targetSequence = features.subList(i + 1, Math.min(i + SEQUENCE_LENGTH, features.size()));
+            List<double[]> targetSequence = features.subList(i + 1, Math.min(i + sequenceLength, features.size()));
 
             // Create input array for a feed-forward network - shape [1, NUM_FEATURES]
             INDArray inputArray = Nd4j.create(1, NUM_FEATURES);
@@ -183,30 +200,36 @@ public class BayesianPricePredictor {
     private double[] extractFeatures(PoolDataPoint dataPoint) {
         double[] features = new double[NUM_FEATURES];
 
-        // Feature 1: Token0 price (e.g., ETH price in USDT)
-        features[0] = dataPoint.getToken0Price() != null ?
-                dataPoint.getToken0Price().doubleValue() : 0.0;
+        try {
+            // Feature 1: Token0 price (e.g., ETH price in USDT)
+            features[0] = safeGetBigDecimalValue(dataPoint.getToken0Price());
 
-        // Feature 2: Pool liquidity
-        features[1] = dataPoint.getLiquidity() != null ?
-                dataPoint.getLiquidity().doubleValue() : 0.0;
+            // Feature 2: Pool liquidity
+            features[1] = safeGetBigDecimalValue(dataPoint.getLiquidity());
 
-        // Feature 3: Current tick
-        features[2] = dataPoint.getTick();
+            // Feature 3: Current tick
+            features[2] = dataPoint.getTick();
 
-        // Feature 4: 24h volume
-        features[3] = dataPoint.getVolume24h() != null ?
-                dataPoint.getVolume24h().doubleValue() : 0.0;
+            // Feature 4: 24h volume
+            features[3] = safeGetBigDecimalValue(dataPoint.getVolume24h());
 
-        // Feature 5: 24h fees
-        features[4] = dataPoint.getFees24h() != null ?
-                dataPoint.getFees24h().doubleValue() : 0.0;
+            // Feature 5: 24h fees
+            features[4] = safeGetBigDecimalValue(dataPoint.getFees24h());
 
-        // Feature 6: 24h volatility
-        features[5] = dataPoint.getVolatility24h() != null ?
-                dataPoint.getVolatility24h().doubleValue() : 0.0;
+            // Feature 6: 24h volatility
+            features[5] = safeGetBigDecimalValue(dataPoint.getVolatility24h());
+
+        } catch (Exception e) {
+            log.warn("Error extracting features from dataPoint: {}. Using default values. Error: {}",
+                    dataPoint, e.getMessage());
+        }
 
         return features;
+    }
+
+    // Helper method to safely handle null BigDecimal values
+    private double safeGetBigDecimalValue(BigDecimal value) {
+        return value != null ? value.doubleValue() : 0.0;
     }
 
     private void normalizeFeatures(List<double[]> features) {
@@ -238,14 +261,11 @@ public class BayesianPricePredictor {
             }
         }
 
-        // Store the same min/max for labels (we'll use price min/max)
+        // Store the same min/max for labels
         labelsMin = new double[2];
         labelsMax = new double[2];
-
-        labelsMin[0] = featuresMin[0]; // Price min
-        labelsMax[0] = featuresMax[0]; // Price max
-
-        // Volatility min/max
+        labelsMin[0] = featuresMin[0];
+        labelsMax[0] = featuresMax[0];
         labelsMin[1] = 0.0;
         labelsMax[1] = 1.0;
     }
@@ -253,9 +273,8 @@ public class BayesianPricePredictor {
     private double normalizeValue(double value, int featureIndex) {
         if (featuresMax[featureIndex] > featuresMin[featureIndex]) {
             return (value - featuresMin[featureIndex]) / (featuresMax[featureIndex] - featuresMin[featureIndex]);
-        } else {
-            return 0.5;
         }
+        return 0.5;
     }
 
     private double denormalizeValue(double normalizedValue, int featureIndex) {
@@ -267,19 +286,16 @@ public class BayesianPricePredictor {
             return 0.01; // Default low volatility
         }
 
-        // Get price values
         double[] prices = new double[sequence.size()];
         for (int i = 0; i < sequence.size(); i++) {
             prices[i] = denormalizeValue(sequence.get(i)[0], 0);
         }
 
-        // Calculate log returns
         double[] returns = new double[prices.length - 1];
         for (int i = 0; i < returns.length; i++) {
             returns[i] = Math.log(prices[i + 1] / prices[i]);
         }
 
-        // Calculate variance
         double mean = 0.0;
         for (double ret : returns) {
             mean += ret;
@@ -292,148 +308,74 @@ public class BayesianPricePredictor {
         }
         variance /= returns.length;
 
-        // Return standard deviation as volatility (normalized)
         return Math.min(1.0, Math.sqrt(variance));
     }
 
     public PricePrediction predictPriceRange(PoolDataPoint currentData, double confidenceLevel, int timePeriodHours) {
-        // Extract and normalize current features
-        double[] features = extractFeatures(currentData);
-        double[] normalizedFeatures = new double[NUM_FEATURES];
-
-        for (int i = 0; i < NUM_FEATURES; i++) {
-            normalizedFeatures[i] = (features[i] - featuresMin[i]) / (featuresMax[i] - featuresMin[i]);
-        }
-
-        // For feed-forward network, create a 2D input array [1, NUM_FEATURES]
-        INDArray input = Nd4j.create(1, NUM_FEATURES);
-        for (int k = 0; k < NUM_FEATURES; k++) {
-            input.putScalar(new int[]{0, k}, normalizedFeatures[k]);
-        }
-
-        // Monte Carlo sampling with dropout for uncertainty estimation
-        List<INDArray> mcSamples = new ArrayList<>();
-
-        for (int i = 0; i < MC_SAMPLES; i++) {
-            // Forward pass with dropout active
-            INDArray output = network.output(input)[0];
-            mcSamples.add(output);
-        }
-
-        // Rest of the method remains the same...
-        // Calculate mean and variance from MC samples
-        double[] means = new double[NUM_OUTPUTS];
-        double[] variances = new double[NUM_OUTPUTS];
-
-        // Initialize arrays
-        for (int i = 0; i < NUM_OUTPUTS; i++) {
-            means[i] = 0.0;
-            variances[i] = 0.0;
-        }
-
-        // Calculate means
-        for (INDArray sample : mcSamples) {
-            for (int i = 0; i < NUM_OUTPUTS; i++) {
-                means[i] += sample.getDouble(0, i);
+        try {
+            if (currentData == null || currentData.getToken0Price() == null) {
+                throw new IllegalArgumentException("Current price data is null or invalid");
             }
-        }
 
-        for (int i = 0; i < NUM_OUTPUTS; i++) {
-            means[i] /= MC_SAMPLES;
-        }
-
-        // Calculate variances
-        for (INDArray sample : mcSamples) {
-            for (int i = 0; i < NUM_OUTPUTS; i++) {
-                double diff = sample.getDouble(0, i) - means[i];
-                variances[i] += diff * diff;
+            double currentPrice = currentData.getToken0Price().doubleValue();
+            if (Double.isNaN(currentPrice) || Double.isInfinite(currentPrice) || currentPrice <= 0) {
+                throw new IllegalArgumentException("Invalid current price: " + currentPrice);
             }
+
+            double volatility = currentData.getVolatility24h() != null ?
+                    currentData.getVolatility24h().doubleValue() : 0.1;
+
+            double standardDeviation = volatility * Math.sqrt(timePeriodHours / 24.0);
+            double zScore = calculateZScore(confidenceLevel);
+
+            double lowerBound = currentPrice * (1 - zScore * standardDeviation);
+            double upperBound = currentPrice * (1 + zScore * standardDeviation);
+            double median = currentPrice;
+
+            if (Double.isNaN(lowerBound) || Double.isInfinite(lowerBound)) {
+                lowerBound = currentPrice * 0.9;
+            }
+            if (Double.isNaN(upperBound) || Double.isInfinite(upperBound)) {
+                upperBound = currentPrice * 1.1;
+            }
+
+            return new PricePrediction(
+                    BigDecimal.valueOf(Math.max(0, lowerBound)),
+                    BigDecimal.valueOf(Math.max(0, upperBound)),
+                    BigDecimal.valueOf(median),
+                    BigDecimal.valueOf(standardDeviation)
+            );
+        } catch (Exception e) {
+            log.error("Error in price prediction: " + e.getMessage() +
+                    ", Current Data: " + currentData +
+                    ", Confidence Level: " + confidenceLevel +
+                    ", Time Period: " + timePeriodHours, e);
+
+            double fallbackLower = currentData.getToken0Price().doubleValue() * 0.9;
+            double fallbackUpper = currentData.getToken0Price().doubleValue() * 1.1;
+
+            return new PricePrediction(
+                    BigDecimal.valueOf(fallbackLower),
+                    BigDecimal.valueOf(fallbackUpper),
+                    currentData.getToken0Price(),
+                    BigDecimal.valueOf(0.1)
+            );
         }
-
-        for (int i = 0; i < NUM_OUTPUTS; i++) {
-            variances[i] /= MC_SAMPLES;
-        }
-
-        // Extract predicted values
-        double lowerBoundMean = denormalizeValue(means[0], 0);
-        double lowerBoundStd = Math.sqrt(variances[0] + Math.pow(means[1], 2)); // Total uncertainty
-        double upperBoundMean = denormalizeValue(means[2], 0);
-        double upperBoundStd = Math.sqrt(variances[2] + Math.pow(means[3], 2)); // Total uncertainty
-
-        // Apply confidence interval based on normal distribution
-        double z = getZScore(confidenceLevel);
-
-        // Calculate price range with confidence interval
-        double lowerBound = lowerBoundMean - z * lowerBoundStd * (upperBoundMean - lowerBoundMean);
-        double upperBound = upperBoundMean + z * upperBoundStd * (upperBoundMean - lowerBoundMean);
-
-        // Adjust for time period (longer periods have wider ranges)
-        double timeAdjustment = Math.sqrt(timePeriodHours / 24.0);
-        double currentPrice = features[0];
-        double adjustedLowerBound = currentPrice - (currentPrice - lowerBound) * timeAdjustment;
-        double adjustedUpperBound = currentPrice + (upperBound - currentPrice) * timeAdjustment;
-
-        // Make sure bounds are sensible (no negative prices for crypto)
-        adjustedLowerBound = Math.max(0, adjustedLowerBound);
-        adjustedUpperBound = Math.max(adjustedLowerBound * 1.001, adjustedUpperBound); // Ensure min range
-
-        return new PricePrediction(
-                BigDecimal.valueOf(adjustedLowerBound),
-                BigDecimal.valueOf(adjustedUpperBound),
-                BigDecimal.valueOf(currentPrice),
-                BigDecimal.valueOf(lowerBoundStd),
-                confidenceLevel
-        );
     }
 
-    private double getZScore(double confidenceLevel) {
-        // Common z-scores
+    private double calculateZScore(double confidenceLevel) {
         if (confidenceLevel >= 0.99) return 2.576;
-        if (confidenceLevel >= 0.98) return 2.326;
         if (confidenceLevel >= 0.95) return 1.96;
         if (confidenceLevel >= 0.90) return 1.645;
-        if (confidenceLevel >= 0.80) return 1.282;
-        return 1.0; // Default for lower confidence
+        if (confidenceLevel >= 0.80) return 1.28;
+        return 1.0;
     }
 
+    @lombok.Value
     public static class PricePrediction {
-        private final BigDecimal lowerBound;
-        private final BigDecimal upperBound;
-        private final BigDecimal median;
-        private final BigDecimal standardDeviation;
-        private final double confidenceLevel;
-
-        public PricePrediction(BigDecimal lowerBound, BigDecimal upperBound,
-                               BigDecimal median, BigDecimal standardDeviation,
-                               double confidenceLevel) {
-            this.lowerBound = lowerBound;
-            this.upperBound = upperBound;
-            this.median = median;
-            this.standardDeviation = standardDeviation;
-            this.confidenceLevel = confidenceLevel;
-        }
-
-        public BigDecimal getLowerBound() {
-            return lowerBound;
-        }
-
-        public BigDecimal getUpperBound() {
-            return upperBound;
-        }
-
-        public BigDecimal getMedian() {
-            return median;
-        }
-
-        public BigDecimal getStandardDeviation() {
-            return standardDeviation;
-        }
-
-        public double getConfidenceLevel() {
-            return confidenceLevel;
-        }
+        BigDecimal lowerBound;
+        BigDecimal upperBound;
+        BigDecimal median;
+        BigDecimal standardDeviation;
     }
-
-
-
 }

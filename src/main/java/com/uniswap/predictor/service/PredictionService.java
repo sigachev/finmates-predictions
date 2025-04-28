@@ -260,6 +260,14 @@ public class PredictionService {
         });
     }
 
+    /**
+     * Predicts price range for a given pool
+     * @param poolAddress The Uniswap V3 pool address
+     * @param confidenceLevel Confidence level (e.g., 0.95 for 95%)
+     * @param timePeriodHours Prediction period in hours (1-168)
+     * @return PredictionResponse containing price ranges and related metrics
+     * @throws IllegalArgumentException if timePeriodHours is invalid
+     */
     public PredictionResponse predictPriceRange(String poolAddress, double confidenceLevel, int timePeriodHours) {
         // Default to WETH/USDT pool if not specified
         if (poolAddress == null || poolAddress.isEmpty()) {
@@ -311,6 +319,9 @@ public class PredictionService {
                 prediction.getStandardDeviation().doubleValue()
         );
 
+        Instant now = Instant.now();
+        Instant endTime = now.plusSeconds(timePeriodHours * 3600);
+
         return PredictionResponse.builder()
                 .lowerPriceRange(prediction.getLowerBound().doubleValue())
                 .upperPriceRange(prediction.getUpperBound().doubleValue())
@@ -319,10 +330,13 @@ public class PredictionService {
                 .predictedFees(predictedFees)
                 .confidenceLevel(confidenceLevel)
                 .poolAddress(poolAddress)
-                .timestamp(System.currentTimeMillis())
+                .timestamp(now.toEpochMilli())
                 .currentPrice(currentData.getToken0Price().doubleValue())
                 .predictedImpermanentLoss(impermanentLoss)
+                .predictionPeriodHours(timePeriodHours)  // Add this
+                .predictionEndTime(endTime)              // Add this
                 .build();
+
     }
 
     private double estimateFeesForRange(int lowerTick, int upperTick, String poolAddress, int timePeriodHours) {

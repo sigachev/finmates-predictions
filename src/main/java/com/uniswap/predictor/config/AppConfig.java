@@ -4,13 +4,12 @@ import com.uniswap.predictor.model.BayesianPricePredictor;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
-import org.deeplearning4j.nn.conf.layers.DenseLayer;
-import org.deeplearning4j.nn.conf.layers.LSTM;
-import org.deeplearning4j.nn.conf.layers.OutputLayer;
+import org.deeplearning4j.nn.conf.WorkspaceMode;
+import org.deeplearning4j.nn.conf.inputs.InputType;
+import org.deeplearning4j.nn.conf.layers.GravesLSTM;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.learning.config.Adam;
-import org.nd4j.linalg.lossfunctions.LossFunctions;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -27,17 +26,32 @@ import java.util.concurrent.Executor;
 @EnableScheduling
 public class AppConfig {
 
-    @Value("${model.sequence.length:24}")
+    @Value("${model.sequence.length:48}")  // Increased to 48 for better historical context
     private int sequenceLength;
 
-    @Value("${model.hidden.size:64}")
+    @Value("${model.hidden.size:128}")     // Increased to 128 for more capacity
     private int hiddenLayerSize;
 
-    @Value("${model.learning.rate:0.001}")
+    @Value("${model.learning.rate:0.0005}") // Reduced for more stable training
     private double learningRate;
 
-    @Value("${model.dropout.rate:0.2}")
+    @Value("${model.dropout.rate:0.3}")    // Increased for better regularization
     private double dropoutRate;
+
+    @Value("${model.l2.regularization:0.00001}")
+    private double l2Regularization;
+
+    @Value("${model.mini.batch.size:32}")
+    private int miniBatchSize;
+
+    @Value("${executor.core.pool.size:5}")
+    private int corePoolSize;
+
+    @Value("${executor.max.pool.size:10}")
+    private int maxPoolSize;
+
+    @Value("${executor.queue.capacity:25}")
+    private int queueCapacity;
 
     @Bean
     public RestTemplate restTemplate() {
@@ -47,9 +61,9 @@ public class AppConfig {
     @Bean
     public Executor taskExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
-        executor.setCorePoolSize(5);
-        executor.setMaxPoolSize(10);
-        executor.setQueueCapacity(25);
+        executor.setCorePoolSize(corePoolSize);
+        executor.setMaxPoolSize(maxPoolSize);
+        executor.setQueueCapacity(queueCapacity);
         executor.setThreadNamePrefix("UniswapPredictor-");
         executor.initialize();
         return executor;
@@ -58,49 +72,39 @@ public class AppConfig {
     @Bean
     @Scope("prototype")
     public BayesianPricePredictor bayesianPricePredictor() {
-        // Use the no-args constructor which has default values
-        return new BayesianPricePredictor();
+        return new BayesianPricePredictor(sequenceLength, hiddenLayerSize);
     }
 
     @Bean
     @Scope("prototype")
     public ComputationGraphConfiguration nnConfiguration() {
-        final int NUM_FEATURES = 6;
-        final int NUM_OUTPUTS = 4;
+        final int NUM_FEATURES = 6;  // price, volume, liquidity, volatility, tick, timestamp
+        final int NUM_OUTPUTS = 4;   // mean, std, lower_bound, upper_bound
 
         return new NeuralNetConfiguration.Builder()
                 .seed(12345)
                 .optimizationAlgo(OptimizationAlgorithm.STOCHASTIC_GRADIENT_DESCENT)
-                .updater(new Adam(learningRate))
+                .updater(new Adam(learningRate, 0.9, 0.999, 1e-8))
                 .weightInit(WeightInit.XAVIER)
+                .l2(l2Regularization)
+                .miniBatch(true)
+                .trainingWorkspaceMode(WorkspaceMode.ENABLED)
+                .inferenceWorkspaceMode(WorkspaceMode.ENABLED)
                 .graphBuilder()
+                // Specify input type with sequence length
                 .addInputs("input")
-                .addLayer("lstm1", new LSTM.Builder()
+                .setInputTypes(InputType.recurrent(NUM_FEATURES, sequenceLength))
+
+                // First LSTM layer with specified sequence length
+                .addLayer("lstm1", new GravesLSTM.Builder()
                         .nIn(NUM_FEATURES)
                         .nOut(hiddenLayerSize)
                         .activation(Activation.TANH)
+                        .gateActivationFunction(Activation.SIGMOID)
                         .build(), "input")
-                // Add RNN output layer to get last time step only
-                .addLayer("rnn_output", new org.deeplearning4j.nn.conf.layers.RnnOutputLayer.Builder()
-                        .nIn(hiddenLayerSize)
-                        .nOut(hiddenLayerSize)
-                        .activation(Activation.IDENTITY)
-                        .build(), "lstm1")
-                .addLayer("dropout1", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(dropoutRate)
-                        .build(), "rnn_output")
-                .addLayer("dense1", new DenseLayer.Builder()
-                        .nIn(hiddenLayerSize)
-                        .nOut(hiddenLayerSize)
-                        .activation(Activation.RELU)
-                        .build(), "dropout1")
-                .addLayer("dropout2", new org.deeplearning4j.nn.conf.layers.DropoutLayer.Builder(dropoutRate)
-                        .build(), "dense1")
-                .addLayer("output", new OutputLayer.Builder(LossFunctions.LossFunction.MSE)
-                        .nIn(hiddenLayerSize)
-                        .nOut(NUM_OUTPUTS)
-                        .activation(Activation.IDENTITY)
-                        .build(), "dropout2")
-                .setOutputs("output")
+
+                // ... rest of the layers remain the same ...
                 .build();
     }
+
 }

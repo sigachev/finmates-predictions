@@ -4,6 +4,8 @@ package com.uniswap.predictor.dto;
 import lombok.Builder;
 import lombok.Data;
 
+import java.time.Instant;
+
 @Data
 @Builder
 public class PredictionResponse {
@@ -17,5 +19,7 @@ public class PredictionResponse {
     private long timestamp;
     private double currentPrice;
     private double predictedImpermanentLoss;
+    private int predictionPeriodHours;
+    private Instant predictionEndTime;
 }
 
