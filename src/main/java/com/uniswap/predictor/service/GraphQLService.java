@@ -3,6 +3,7 @@ package com.uniswap.predictor.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -16,6 +17,7 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 
+@Slf4j
 @Service
 public class GraphQLService {
 
@@ -25,6 +27,12 @@ public class GraphQLService {
 
     @Value("${thegraph.api.key:}")
     private String graphApiKey;
+
+    @Value("${http.connect.timeout:10000}")
+    private int connectTimeout;
+
+    @Value("${http.read.timeout:30000}")
+    private int readTimeout;
 
     private String fullGraphUrl;
 
@@ -37,6 +45,7 @@ public class GraphQLService {
     public void initialize() {
         // Replace [api-key] placeholder with actual API key from application properties
         fullGraphUrl = UNISWAP_SUBGRAPH_URL.replace("[api-key]", graphApiKey);
+        log.info("GraphQLService initialized with URL: {}", fullGraphUrl.replaceAll(graphApiKey, "***"));
     }
 
     public double getVolume24h(String poolAddress) {
@@ -49,6 +58,7 @@ public class GraphQLService {
 
         if (response != null && response.has("data") &&
                 response.get("data").has("pool") &&
+                !response.get("data").get("pool").isNull() &&
                 response.get("data").get("pool").has("volumeUSD")) {
 
             return response.get("data").get("pool").get("volumeUSD").asDouble();
@@ -67,6 +77,7 @@ public class GraphQLService {
 
         if (response != null && response.has("data") &&
                 response.get("data").has("pool") &&
+                !response.get("data").get("pool").isNull() &&
                 response.get("data").get("pool").has("feesUSD")) {
 
             return response.get("data").get("pool").get("feesUSD").asDouble();
@@ -90,15 +101,19 @@ public class GraphQLService {
 
             List<Double> prices = new ArrayList<>();
             for (JsonNode hourData : hourDatas) {
-                prices.add(hourData.get("close").asDouble());
+                if (hourData.has("close") && !hourData.get("close").isNull()) {
+                    prices.add(hourData.get("close").asDouble());
+                }
             }
 
             if (prices.size() > 1) {
                 // Calculate standard deviation of returns
                 List<Double> returns = new ArrayList<>();
                 for (int i = 1; i < prices.size(); i++) {
-                    double returnValue = Math.log(prices.get(i) / prices.get(i-1));
-                    returns.add(returnValue);
+                    if (prices.get(i - 1) > 0) {
+                        double returnValue = Math.log(prices.get(i) / prices.get(i - 1));
+                        returns.add(returnValue);
+                    }
                 }
 
                 double mean = returns.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
@@ -129,25 +144,31 @@ public class GraphQLService {
             JsonNode swaps = response.get("data").get("swaps");
 
             for (JsonNode swap : swaps) {
-                // Check if liquidity field exists, it might not in some subgraph schemas
-                BigInteger liquidity = swap.has("liquidity") ?
-                        new BigInteger(swap.get("liquidity").asText()) :
-                        BigInteger.ZERO;
+                try {
+                    // Check if liquidity field exists, it might not in some subgraph schemas
+                    BigInteger liquidity = swap.has("liquidity") ?
+                            new BigInteger(swap.get("liquidity").asText()) :
+                            BigInteger.ZERO;
 
-                SwapEvent event = new SwapEvent(
-                        swap.get("timestamp").asLong(),
-                        new BigDecimal(swap.get("sqrtPriceX96").asText()),
-                        swap.get("tick").asInt(),
-                        liquidity,
-                        new BigDecimal(swap.get("amount0").asText()),
-                        new BigDecimal(swap.get("amount1").asText()),
-                        swap.has("amountUSD") ? new BigDecimal(swap.get("amountUSD").asText()) : BigDecimal.ZERO
-                );
+                    SwapEvent event = new SwapEvent(
+                            swap.get("timestamp").asLong(),
+                            new BigDecimal(swap.get("sqrtPriceX96").asText()),
+                            swap.get("tick").asInt(),
+                            liquidity,
+                            new BigDecimal(swap.get("amount0").asText()),
+                            new BigDecimal(swap.get("amount1").asText()),
+                            swap.has("amountUSD") ? new BigDecimal(swap.get("amountUSD").asText()) : BigDecimal.ZERO
+                    );
 
-                swapEvents.add(event);
+                    swapEvents.add(event);
+                } catch (Exception e) {
+                    log.warn("Error parsing swap event: {}", e.getMessage());
+                    // Skip this event but continue processing others
+                }
             }
         }
 
+        log.debug("Retrieved {} historical swap events for pool {}", swapEvents.size(), poolAddress);
         return swapEvents;
     }
 
@@ -166,18 +187,23 @@ public class GraphQLService {
             JsonNode mints = mintsResponse.get("data").get("mints");
 
             for (JsonNode mint : mints) {
-                LiquidityEvent event = new LiquidityEvent(
-                        mint.get("timestamp").asLong(),
-                        LiquidityEventType.MINT,
-                        new BigDecimal(mint.get("amount0").asText()),
-                        new BigDecimal(mint.get("amount1").asText()),
-                        mint.get("tickLower").asInt(),
-                        mint.get("tickUpper").asInt(),
-                        new BigDecimal(mint.get("liquidity").asText()),
-                        mint.has("amountUSD") ? new BigDecimal(mint.get("amountUSD").asText()) : BigDecimal.ZERO
-                );
+                try {
+                    LiquidityEvent event = new LiquidityEvent(
+                            mint.get("timestamp").asLong(),
+                            LiquidityEventType.MINT,
+                            new BigDecimal(mint.get("amount0").asText()),
+                            new BigDecimal(mint.get("amount1").asText()),
+                            mint.get("tickLower").asInt(),
+                            mint.get("tickUpper").asInt(),
+                            new BigDecimal(mint.get("liquidity").asText()),
+                            mint.has("amountUSD") ? new BigDecimal(mint.get("amountUSD").asText()) : BigDecimal.ZERO
+                    );
 
-                liquidityEvents.add(event);
+                    liquidityEvents.add(event);
+                } catch (Exception e) {
+                    log.warn("Error parsing mint event: {}", e.getMessage());
+                    // Skip this event but continue processing others
+                }
             }
         }
 
@@ -194,21 +220,27 @@ public class GraphQLService {
             JsonNode burns = burnsResponse.get("data").get("burns");
 
             for (JsonNode burn : burns) {
-                LiquidityEvent event = new LiquidityEvent(
-                        burn.get("timestamp").asLong(),
-                        LiquidityEventType.BURN,
-                        new BigDecimal(burn.get("amount0").asText()),
-                        new BigDecimal(burn.get("amount1").asText()),
-                        burn.get("tickLower").asInt(),
-                        burn.get("tickUpper").asInt(),
-                        new BigDecimal(burn.get("liquidity").asText()),
-                        burn.has("amountUSD") ? new BigDecimal(burn.get("amountUSD").asText()) : BigDecimal.ZERO
-                );
+                try {
+                    LiquidityEvent event = new LiquidityEvent(
+                            burn.get("timestamp").asLong(),
+                            LiquidityEventType.BURN,
+                            new BigDecimal(burn.get("amount0").asText()),
+                            new BigDecimal(burn.get("amount1").asText()),
+                            burn.get("tickLower").asInt(),
+                            burn.get("tickUpper").asInt(),
+                            new BigDecimal(burn.get("liquidity").asText()),
+                            burn.has("amountUSD") ? new BigDecimal(burn.get("amountUSD").asText()) : BigDecimal.ZERO
+                    );
 
-                liquidityEvents.add(event);
+                    liquidityEvents.add(event);
+                } catch (Exception e) {
+                    log.warn("Error parsing burn event: {}", e.getMessage());
+                    // Skip this event but continue processing others
+                }
             }
         }
 
+        log.debug("Retrieved {} historical liquidity events for pool {}", liquidityEvents.size(), poolAddress);
         return liquidityEvents;
     }
 
@@ -230,6 +262,7 @@ public class GraphQLService {
             // Parse response
             return objectMapper.readTree(response.getBody());
         } catch (Exception e) {
+            log.error("Error executing GraphQL query: {}", e.getMessage());
             throw new RuntimeException("Error executing GraphQL query", e);
         }
     }
@@ -267,13 +300,33 @@ public class GraphQLService {
             this.amountUSD = amountUSD;
         }
 
-        public long getTimestamp() { return timestamp; }
-        public BigDecimal getSqrtPriceX96() { return sqrtPriceX96; }
-        public int getTick() { return tick; }
-        public BigInteger getLiquidity() { return liquidity; }
-        public BigDecimal getAmount0() { return amount0; }
-        public BigDecimal getAmount1() { return amount1; }
-        public BigDecimal getAmountUSD() { return amountUSD; }
+        public long getTimestamp() {
+            return timestamp;
+        }
+
+        public BigDecimal getSqrtPriceX96() {
+            return sqrtPriceX96;
+        }
+
+        public int getTick() {
+            return tick;
+        }
+
+        public BigInteger getLiquidity() {
+            return liquidity;
+        }
+
+        public BigDecimal getAmount0() {
+            return amount0;
+        }
+
+        public BigDecimal getAmount1() {
+            return amount1;
+        }
+
+        public BigDecimal getAmountUSD() {
+            return amountUSD;
+        }
     }
 
     public static class LiquidityEvent {
@@ -300,18 +353,43 @@ public class GraphQLService {
             this.amountUSD = amountUSD;
         }
 
-        public long getTimestamp() { return timestamp; }
-        public LiquidityEventType getType() { return type; }
-        public BigDecimal getAmount0() { return amount0; }
-        public BigDecimal getAmount1() { return amount1; }
-        public int getTickLower() { return tickLower; }
-        public int getTickUpper() { return tickUpper; }
-        public BigDecimal getLiquidity() { return liquidity; }
-        public BigDecimal getAmountUSD() { return amountUSD; }
+        public long getTimestamp() {
+            return timestamp;
+        }
+
+        public LiquidityEventType getType() {
+            return type;
+        }
+
+        public BigDecimal getAmount0() {
+            return amount0;
+        }
+
+        public BigDecimal getAmount1() {
+            return amount1;
+        }
+
+        public int getTickLower() {
+            return tickLower;
+        }
+
+        public int getTickUpper() {
+            return tickUpper;
+        }
+
+        public BigDecimal getLiquidity() {
+            return liquidity;
+        }
+
+        public BigDecimal getAmountUSD() {
+            return amountUSD;
+        }
     }
 
     public enum LiquidityEventType {
         MINT,
         BURN
     }
+
+
 }

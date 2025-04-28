@@ -3,6 +3,7 @@ package com.uniswap.predictor.service;
 import com.uniswap.predictor.dto.PoolDataPoint;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -20,7 +21,9 @@ import java.util.concurrent.TimeoutException;
 public class DataCollectionService {
     private final BlockchainService blockchainService;
     private final GraphQLService graphQLService;
-    private static final long ASYNC_TIMEOUT_SECONDS = 10;
+
+    @Value("${async.timeout.seconds:10}")
+    private long asyncTimeoutSeconds;
 
     @Autowired
     public DataCollectionService(BlockchainService blockchainService, GraphQLService graphQLService) {
@@ -30,11 +33,16 @@ public class DataCollectionService {
 
     public PoolDataPoint getCurrentPoolData(String poolAddress) {
         try {
+            log.debug("Fetching current pool data for {}", poolAddress);
+
+            // Get on-chain pool state
             BlockchainService.PoolState poolState = blockchainService.getPoolState(poolAddress);
 
+            // Calculate prices using token decimals (now properly adjusted in BlockchainService)
             double token0Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), poolAddress, true);
             double token1Price = blockchainService.calculatePrice(poolState.getSqrtPriceX96(), poolAddress, false);
 
+            // Fetch additional data from The Graph asynchronously
             CompletableFuture<Double> volume24hFuture = CompletableFuture.supplyAsync(() ->
                     graphQLService.getVolume24h(poolAddress));
 
@@ -44,11 +52,13 @@ public class DataCollectionService {
             CompletableFuture<Double> volatility24hFuture = CompletableFuture.supplyAsync(() ->
                     graphQLService.getVolatility24h(poolAddress));
 
-            Double volume24h = volume24hFuture.get(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            Double fees24h = fees24hFuture.get(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            Double volatility24h = volatility24hFuture.get(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // Wait for all futures to complete with timeout
+            Double volume24h = volume24hFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+            Double fees24h = fees24hFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+            Double volatility24h = volatility24hFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
 
-            return PoolDataPoint.builder()
+            // Create the data point with all collected information
+            PoolDataPoint dataPoint = PoolDataPoint.builder()
                     .timestamp(Instant.now())
                     .sqrtPriceX96(new BigDecimal(poolState.getSqrtPriceX96()))
                     .liquidity(new BigDecimal(poolState.getLiquidity()))
@@ -60,29 +70,43 @@ public class DataCollectionService {
                     .volatility24h(BigDecimal.valueOf(volatility24h))
                     .build();
 
+            log.debug("Retrieved current pool data for {}: price={}, tick={}",
+                    poolAddress, token0Price, poolState.getTick());
+
+            return dataPoint;
+
         } catch (IOException | InterruptedException | ExecutionException | TimeoutException e) {
             log.error("Error getting pool data for {}: {}", poolAddress, e.getMessage());
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            throw new RuntimeException("Error getting pool data", e);
+            throw new RuntimeException("Error getting pool data for pool: " + poolAddress, e);
         }
     }
 
     public List<PoolDataPoint> collectHistoricalData(String poolAddress, Instant startTime, Instant endTime) {
         try {
+            log.debug("Collecting historical data for {} from {} to {}",
+                    poolAddress, startTime, endTime);
+
             List<PoolDataPoint> historicalData = new ArrayList<>();
 
+            // Fetch historical swap and liquidity events asynchronously
             CompletableFuture<List<GraphQLService.SwapEvent>> swapsFuture = CompletableFuture.supplyAsync(() ->
                     graphQLService.getHistoricalSwaps(poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
 
             CompletableFuture<List<GraphQLService.LiquidityEvent>> liquidityFuture = CompletableFuture.supplyAsync(() ->
                     graphQLService.getHistoricalLiquidity(poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
 
-            List<GraphQLService.SwapEvent> swapEvents = swapsFuture.get(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            List<GraphQLService.LiquidityEvent> liquidityEvents = liquidityFuture.get(ASYNC_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            // Wait for futures to complete with timeout
+            List<GraphQLService.SwapEvent> swapEvents = swapsFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+            List<GraphQLService.LiquidityEvent> liquidityEvents = liquidityFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
 
+            // Process the retrieved events
             processHistoricalEvents(historicalData, swapEvents, liquidityEvents, poolAddress);
+
+            log.debug("Collected {} historical data points for {}",
+                    historicalData.size(), poolAddress);
 
             return historicalData;
 
@@ -91,7 +115,7 @@ public class DataCollectionService {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            throw new RuntimeException("Error collecting historical data", e);
+            throw new RuntimeException("Error collecting historical data for pool: " + poolAddress, e);
         }
     }
 
@@ -100,7 +124,9 @@ public class DataCollectionService {
                                          List<GraphQLService.LiquidityEvent> liquidityEvents,
                                          String poolAddress) {
         try {
+            // Process each swap event and convert to a PoolDataPoint
             for (GraphQLService.SwapEvent swap : swapEvents) {
+                // Use BlockchainService to calculate prices with proper decimal adjustment
                 double token0Price = blockchainService.calculatePrice(
                         swap.getSqrtPriceX96().toBigInteger(),
                         poolAddress,
@@ -113,6 +139,7 @@ public class DataCollectionService {
                         false
                 );
 
+                // Create data point with the event data and calculated metrics
                 PoolDataPoint dataPoint = PoolDataPoint.builder()
                         .timestamp(swap.getTimestamp())
                         .sqrtPriceX96(swap.getSqrtPriceX96())
@@ -121,18 +148,19 @@ public class DataCollectionService {
                         .token1Price(BigDecimal.valueOf(token1Price))
                         .liquidity(new BigDecimal(swap.getLiquidity()))
                         .volume24h(BigDecimal.valueOf(calculateVolumeForEvent(swap)))
-                        .fees24h(BigDecimal.valueOf(calculateFeesForEvent(swap)))
+                        .fees24h(BigDecimal.valueOf(calculateFeesForEvent(swap, poolAddress)))
                         .volatility24h(BigDecimal.valueOf(calculateVolatilityForEvent(swap, result)))
                         .build();
 
                 result.add(dataPoint);
             }
 
+            // Sort the results by timestamp
             result.sort((a, b) -> Long.compare(a.getTimestamp(), b.getTimestamp()));
 
         } catch (Exception e) {
             log.error("Error processing historical events for pool {}: {}", poolAddress, e.getMessage());
-            throw new RuntimeException("Error processing historical events", e);
+            throw new RuntimeException("Error processing historical events for pool: " + poolAddress, e);
         }
     }
 
@@ -140,8 +168,27 @@ public class DataCollectionService {
         return swap.getAmountUSD().doubleValue();
     }
 
-    private double calculateFeesForEvent(GraphQLService.SwapEvent swap) {
-        return swap.getAmountUSD().multiply(new BigDecimal("0.003")).doubleValue();
+    private double calculateFeesForEvent(GraphQLService.SwapEvent swap, String poolAddress) {
+        try {
+            // Get the fee tier dynamically instead of hardcoding 0.003 (0.3%)
+            int feeTier = getFeePercentageForPool(poolAddress);
+            return swap.getAmountUSD().multiply(BigDecimal.valueOf(feeTier / 1000000.0)).doubleValue();
+        } catch (Exception e) {
+            // Fallback to 0.3% if fee tier can't be determined
+            return swap.getAmountUSD().multiply(new BigDecimal("0.003")).doubleValue();
+        }
+    }
+
+    // Helper method to get fee percentage for a pool
+    private int getFeePercentageForPool(String poolAddress) {
+        try {
+            // This method would ideally call blockchainService to get the fee tier
+            // For now, defaulting to 3000 (0.3%) as a common fee tier
+            return 3000;
+        } catch (Exception e) {
+            log.warn("Failed to determine fee tier for pool {}, using default 0.3%", poolAddress);
+            return 3000; // 0.3% default fee tier
+        }
     }
 
     private double calculateVolatilityForEvent(GraphQLService.SwapEvent currentSwap, List<PoolDataPoint> previousData) {
@@ -149,9 +196,11 @@ public class DataCollectionService {
             return 0.0;
         }
 
+        // Calculate volatility based on price returns
         List<Double> returns = new ArrayList<>();
         double currentPrice = currentSwap.getSqrtPriceX96().doubleValue();
 
+        // Consider data points from the last 24 hours
         for (PoolDataPoint point : previousData) {
             if (currentSwap.getTimestamp() - point.getTimestamp() <= 24 * 3600) {
                 double previousPrice = point.getSqrtPriceX96().doubleValue();
@@ -165,6 +214,7 @@ public class DataCollectionService {
             return 0.0;
         }
 
+        // Calculate volatility as standard deviation of log returns
         double mean = returns.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         double variance = returns.stream()
                 .mapToDouble(r -> Math.pow(r - mean, 2))

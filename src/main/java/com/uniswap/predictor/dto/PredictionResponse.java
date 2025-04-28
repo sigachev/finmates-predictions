@@ -1,4 +1,3 @@
-
 package com.uniswap.predictor.dto;
 
 import lombok.Builder;
@@ -22,4 +21,3 @@ public class PredictionResponse {
     private int predictionPeriodHours;
     private Instant predictionEndTime;
 }
-

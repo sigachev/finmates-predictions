@@ -66,12 +66,9 @@ public class PredictionController {
         }
     }
 
-
     @GetMapping("/progress/{poolAddress}")
     public ResponseEntity<Map<String, Object>> getTrainingProgressDetails(@PathVariable String poolAddress) {
         Map<String, Object> progressDetails = predictionService.getTrainingProgressDetails(poolAddress);
         return ResponseEntity.ok(progressDetails);
     }
-
-
 }

@@ -4,6 +4,7 @@ import com.uniswap.predictor.dto.PoolDataPoint;
 import com.uniswap.predictor.dto.PredictionResponse;
 import com.uniswap.predictor.model.BayesianPricePredictor;
 import jakarta.annotation.PostConstruct;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -21,9 +22,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 public class PredictionService {
-    // Add a class to store detailed training status
+    // Class to store detailed training status
     public static class TrainingStatus {
         private final AtomicInteger progressPercentage = new AtomicInteger(0);
         private final AtomicBoolean inProgress = new AtomicBoolean(false);
@@ -55,15 +57,26 @@ public class PredictionService {
         public void setLastUpdateTime(long value) { lastUpdateTime.set(value); }
     }
 
-    // Replace the existing status maps with a single map of TrainingStatus objects
+    // Map of training status for each pool
     private final Map<String, TrainingStatus> trainingStatusByPool = new ConcurrentHashMap<>();
 
     private final BlockchainService blockchainService;
     private final DataCollectionService dataCollectionService;
 
+    // Configuration values
     @Value("${uniswap.default.pool:0x641C00A822e8b671738d32a431a4Fb6074E5c79d}")
     private String defaultPoolAddress;
 
+    @Value("${model.retraining.schedule.hours:24}")
+    private int retrainingIntervalHours;
+
+    @Value("${model.epochs:10}")
+    private int trainingEpochs;
+
+    @Value("${model.historical.days:30}")
+    private int historicalDataDays;
+
+    // Map of models for each pool
     private final Map<String, BayesianPricePredictor> modelsByPool = new ConcurrentHashMap<>();
 
     @Autowired
@@ -75,6 +88,8 @@ public class PredictionService {
     @PostConstruct
     public void initialize() {
         try {
+            log.info("Initializing prediction service with default pool: {}", defaultPoolAddress);
+
             // Initialize default model
             getOrCreateModel(defaultPoolAddress);
 
@@ -83,19 +98,18 @@ public class PredictionService {
                 try {
                     retrainModel();
                 } catch (Exception e) {
-                    System.err.println("Error during initial model training: " + e.getMessage());
-                    e.printStackTrace();
+                    log.error("Error during initial model training: {}", e.getMessage(), e);
                 }
             }).start();
         } catch (Exception e) {
             // Log the error but don't prevent app from starting
-            System.err.println("Error initializing prediction service: " + e.getMessage());
-            e.printStackTrace();
+            log.error("Error initializing prediction service: {}", e.getMessage(), e);
         }
     }
 
-    @Scheduled(fixedRate = 86400000) // Retrain every 24 hours
+    @Scheduled(fixedRateString = "${model.retraining.schedule.ms:86400000}") // Default: Retrain every 24 hours
     public void scheduledModelUpdate() {
+        log.info("Scheduled model retraining triggered");
         retrainModel();
     }
 
@@ -112,16 +126,30 @@ public class PredictionService {
         return trainingStatusByPool.computeIfAbsent(poolAddress, k -> new TrainingStatus());
     }
 
-    // New method to get training progress details
+    // Method to get training progress details
     public Map<String, Object> getTrainingProgressDetails(String poolAddress) {
         if (poolAddress == null || poolAddress.isEmpty()) {
             poolAddress = defaultPoolAddress;
         }
 
         TrainingStatus status = getTrainingStatus(poolAddress);
+        String token0Symbol = "Unknown";
+        String token1Symbol = "Unknown";
+
+        try {
+            // Try to get token symbols for more user-friendly display
+            String token0Address = blockchainService.getTokenAddress(poolAddress, "0");
+            String token1Address = blockchainService.getTokenAddress(poolAddress, "1");
+            token0Symbol = blockchainService.getTokenSymbol(token0Address);
+            token1Symbol = blockchainService.getTokenSymbol(token1Address);
+        } catch (Exception e) {
+            log.warn("Could not retrieve token symbols for pool {}: {}", poolAddress, e.getMessage());
+        }
 
         Map<String, Object> result = new HashMap<>();
         result.put("poolAddress", poolAddress);
+        result.put("token0Symbol", token0Symbol);
+        result.put("token1Symbol", token1Symbol);
         result.put("progressPercentage", status.getProgressPercentage());
         result.put("inProgress", status.isInProgress());
         result.put("modelReady", status.isModelReady());
@@ -143,6 +171,7 @@ public class PredictionService {
 
         // Check if training is already in progress
         if (status.isInProgress()) {
+            log.info("Training already in progress for pool {}, skipping", poolAddress);
             return;
         }
 
@@ -156,45 +185,45 @@ public class PredictionService {
 
         Thread trainingThread = new Thread(() -> {
             try {
-                System.out.println("Starting model training for pool: " + finalPoolAddress);
+                log.info("Starting model training for pool: {}", finalPoolAddress);
 
                 // Initialize - 0-10%
                 status.setProgressPercentage(0);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                System.out.println("Progress: 0% - Starting training for pool: " + finalPoolAddress);
+                log.info("Progress: 0% - Starting training for pool: {}", finalPoolAddress);
 
                 // Get or create the model
                 BayesianPricePredictor pricePredictor = getOrCreateModel(finalPoolAddress);
 
                 status.setProgressPercentage(10);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                System.out.println("Progress: 10% - Model initialized for pool: " + finalPoolAddress);
+                log.info("Progress: 10% - Model initialized for pool: {}", finalPoolAddress);
 
                 // Data collection - 10-30%
                 status.setProgressPercentage(15);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                System.out.println("Progress: 15% - Collecting historical data for pool: " + finalPoolAddress);
+                log.info("Progress: 15% - Collecting historical data for pool: {}", finalPoolAddress);
 
                 List<PoolDataPoint> historicalData = dataCollectionService.collectHistoricalData(
                         finalPoolAddress,
-                        Instant.now().minus(Duration.ofDays(30)),
+                        Instant.now().minus(Duration.ofDays(historicalDataDays)),
                         Instant.now()
                 );
 
                 status.setProgressPercentage(30);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                System.out.println("Progress: 30% - Historical data collected: " + historicalData.size() + " points");
+                log.info("Progress: 30% - Historical data collected: {} points", historicalData.size());
 
                 // Data preparation - 30-40%
                 status.setProgressPercentage(35);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                System.out.println("Progress: 35% - Preparing training data");
+                log.info("Progress: 35% - Preparing training data");
 
                 // Train if enough data
                 if (historicalData.size() > 24) {
                     status.setProgressPercentage(40);
                     status.setLastUpdateTime(System.currentTimeMillis());
-                    System.out.println("Progress: 40% - Beginning model training");
+                    log.info("Progress: 40% - Beginning model training");
 
                     // Store total epochs for reference
                     status.setTotalEpochs(pricePredictor.getNumEpochs());
@@ -213,10 +242,8 @@ public class PredictionService {
 
                                 // Log meaningful updates
                                 if (epoch == 0 || (epoch + 1) == totalEpochs || (epoch + 1) % 10 == 0) {
-                                    System.out.println("Progress: " + progress + "% - Training epoch "
-                                            + (epoch + 1) + "/" + totalEpochs
-                                            + " for pool: " + finalPoolAddress
-                                            + " (score: " + String.format("%.4f", score) + ")");
+                                    log.info("Progress: {}% - Training epoch {}/{} for pool: {} (score: {})",
+                                            progress, (epoch + 1), totalEpochs, finalPoolAddress, score);
                                 }
                             };
 
@@ -226,22 +253,22 @@ public class PredictionService {
                     // Finalization - 90-100%
                     status.setProgressPercentage(90);
                     status.setLastUpdateTime(System.currentTimeMillis());
-                    System.out.println("Progress: 90% - Core training completed");
+                    log.info("Progress: 90% - Core training completed");
 
                     // Finalize
                     status.setProgressPercentage(100);
                     status.setModelReady(true);
                     status.setLastUpdateTime(System.currentTimeMillis());
-                    System.out.println("Progress: 100% - Model training completed for pool: " + finalPoolAddress);
+                    log.info("Progress: 100% - Model training completed for pool: {}", finalPoolAddress);
                 } else {
                     // Log insufficient data
-                    System.err.println("Insufficient historical data for pool: " + finalPoolAddress);
+                    log.error("Insufficient historical data for pool {}: {} points (need at least 24)",
+                            finalPoolAddress, historicalData.size());
                     status.setProgressPercentage(-1); // Use negative value to indicate error
                     status.setLastUpdateTime(System.currentTimeMillis());
                 }
             } catch (Exception e) {
-                System.err.println("Error training model for pool: " + finalPoolAddress);
-                e.printStackTrace();
+                log.error("Error training model for pool {}: {}", finalPoolAddress, e.getMessage(), e);
                 status.setProgressPercentage(-1);
                 status.setLastUpdateTime(System.currentTimeMillis());
             } finally {
@@ -269,7 +296,16 @@ public class PredictionService {
      * @throws IllegalArgumentException if timePeriodHours is invalid
      */
     public PredictionResponse predictPriceRange(String poolAddress, double confidenceLevel, int timePeriodHours) {
-        // Default to WETH/USDT pool if not specified
+        // Validate inputs
+        if (timePeriodHours < 1 || timePeriodHours > 168) {
+            throw new IllegalArgumentException("Time period must be between 1 and 168 hours");
+        }
+
+        if (confidenceLevel < 0.5 || confidenceLevel > 0.99) {
+            throw new IllegalArgumentException("Confidence level must be between 0.5 and 0.99");
+        }
+
+        // Default to the configured pool if not specified
         if (poolAddress == null || poolAddress.isEmpty()) {
             poolAddress = defaultPoolAddress;
         }
@@ -322,6 +358,12 @@ public class PredictionService {
         Instant now = Instant.now();
         Instant endTime = now.plusSeconds(timePeriodHours * 3600);
 
+        // Log the prediction
+        log.debug("Price prediction for pool {}: current={}, range=[{}, {}], ticks=[{}, {}]",
+                poolAddress, currentData.getToken0Price(),
+                prediction.getLowerBound(), prediction.getUpperBound(),
+                optimalTicks[0], optimalTicks[1]);
+
         return PredictionResponse.builder()
                 .lowerPriceRange(prediction.getLowerBound().doubleValue())
                 .upperPriceRange(prediction.getUpperBound().doubleValue())
@@ -333,10 +375,9 @@ public class PredictionService {
                 .timestamp(now.toEpochMilli())
                 .currentPrice(currentData.getToken0Price().doubleValue())
                 .predictedImpermanentLoss(impermanentLoss)
-                .predictionPeriodHours(timePeriodHours)  // Add this
-                .predictionEndTime(endTime)              // Add this
+                .predictionPeriodHours(timePeriodHours)
+                .predictionEndTime(endTime)
                 .build();
-
     }
 
     private double estimateFeesForRange(int lowerTick, int upperTick, String poolAddress, int timePeriodHours) {
@@ -347,8 +388,12 @@ public class PredictionService {
                 Instant.now()
         );
 
+        if (recentData.isEmpty()) {
+            log.warn("No historical data available for fee estimation for pool: {}", poolAddress);
+            return 0.0;
+        }
+
         // Calculate fee estimate based on historical data
-        // This is a simplified approach - production system would need more sophistication
         double avgHourlyFees = recentData.stream()
                 .mapToDouble(dp -> dp.getFees24h().doubleValue() / 24.0)
                 .average()
@@ -356,6 +401,9 @@ public class PredictionService {
 
         // Apply an adjustment based on how well the tick range covers historical price movements
         double rangeUtilization = calculateRangeUtilization(lowerTick, upperTick, recentData);
+
+        log.debug("Fee estimation for pool {}: avgHourlyFees={}, rangeUtilization={}, hours={}",
+                poolAddress, avgHourlyFees, rangeUtilization, timePeriodHours);
 
         return avgHourlyFees * timePeriodHours * rangeUtilization;
     }
@@ -366,16 +414,22 @@ public class PredictionService {
                 .filter(data -> data.getTick() >= lowerTick && data.getTick() <= upperTick)
                 .count();
 
-        return (double) timeInRange / historicalData.size();
+        return historicalData.isEmpty() ? 0.0 : (double) timeInRange / historicalData.size();
     }
 
     private double estimateImpermanentLoss(double currentPrice, double predictedPrice, double stdDev) {
         // Using a common impermanent loss formula
         double priceRatio = predictedPrice / currentPrice;
+
+        // Prevent division by zero or negative values
+        if (priceRatio <= 0) {
+            return 0.0;
+        }
+
         double impermanentLoss = 2 * Math.sqrt(priceRatio) / (1 + priceRatio) - 1;
 
         // Convert to percentage and adjust based on prediction uncertainty
-        return Math.abs(impermanentLoss * 100) * (1 + stdDev / predictedPrice);
+        return Math.abs(impermanentLoss * 100) * (1 + stdDev / Math.max(0.0001, predictedPrice));
     }
 
     public String getModelStatus() {

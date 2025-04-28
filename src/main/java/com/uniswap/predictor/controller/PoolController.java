@@ -79,7 +79,6 @@ public class PoolController {
     }
 }
 
-// DTOs for Pool Controller
 @Data
 @Builder
 class PoolInfoResponse {

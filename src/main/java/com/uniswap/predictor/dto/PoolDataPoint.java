@@ -50,4 +50,5 @@ public class PoolDataPoint {
     public Instant getTimestampAsInstant() {
         return Instant.ofEpochSecond(timestamp);
     }
+
 }
