@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
@@ -75,6 +76,10 @@ public class PredictionService {
 
     @Value("${model.historical.days:30}")
     private int historicalDataDays;
+
+    // UPDATED: New configuration for training data timeframe
+    @Value("${model.training.days:30}")
+    private int trainingDataDays;
 
     // Map of models for each pool
     private final Map<String, BayesianPricePredictor> modelsByPool = new ConcurrentHashMap<>();
@@ -157,6 +162,7 @@ public class PredictionService {
         result.put("totalEpochs", status.getTotalEpochs());
         result.put("latestScore", status.getLatestScore());
         result.put("lastUpdateTime", status.getLastUpdateTime());
+        result.put("trainingDataDays", trainingDataDays); // Add training days info
 
         return result;
     }
@@ -204,15 +210,17 @@ public class PredictionService {
                 status.setLastUpdateTime(System.currentTimeMillis());
                 log.info("Progress: 15% - Collecting historical data for pool: {}", finalPoolAddress);
 
+                // UPDATED: Use trainingDataDays instead of hardcoded value
                 List<PoolDataPoint> historicalData = dataCollectionService.collectHistoricalData(
                         finalPoolAddress,
-                        Instant.now().minus(Duration.ofDays(historicalDataDays)),
+                        Instant.now().minus(Duration.ofDays(trainingDataDays)),
                         Instant.now()
                 );
 
                 status.setProgressPercentage(30);
                 status.setLastUpdateTime(System.currentTimeMillis());
-                log.info("Progress: 30% - Historical data collected: {} points", historicalData.size());
+                log.info("Progress: 30% - Historical data collected: {} points over {} days",
+                        historicalData.size(), trainingDataDays);
 
                 // Data preparation - 30-40%
                 status.setProgressPercentage(35);
@@ -288,17 +296,38 @@ public class PredictionService {
     }
 
     /**
+     * Predicts price range for a given pool for X days
+     * @param poolAddress The Uniswap V3 pool address
+     * @param confidenceLevel Confidence level (e.g., 0.95 for 95%)
+     * @param durationDays Prediction period in days (1-30)
+     * @return PredictionResponse containing price ranges and related metrics
+     * @throws IllegalArgumentException if durationDays is invalid
+     */
+    public PredictionResponse predictPriceRangeForDays(String poolAddress, double confidenceLevel, int durationDays) {
+        // Validate inputs
+        if (durationDays < 1 || durationDays > 30) {
+            throw new IllegalArgumentException("Time period must be between 1 and 30 days");
+        }
+
+        // Convert days to hours for internal processing
+        int timePeriodHours = durationDays * 24;
+
+        return predictPriceRange(poolAddress, confidenceLevel, timePeriodHours, durationDays);
+    }
+
+    /**
      * Predicts price range for a given pool
      * @param poolAddress The Uniswap V3 pool address
      * @param confidenceLevel Confidence level (e.g., 0.95 for 95%)
-     * @param timePeriodHours Prediction period in hours (1-168)
+     * @param timePeriodHours Prediction period in hours (1-720)
+     * @param durationDays Optional parameter for days duration (for display)
      * @return PredictionResponse containing price ranges and related metrics
      * @throws IllegalArgumentException if timePeriodHours is invalid
      */
-    public PredictionResponse predictPriceRange(String poolAddress, double confidenceLevel, int timePeriodHours) {
+    public PredictionResponse predictPriceRange(String poolAddress, double confidenceLevel, int timePeriodHours, Integer durationDays) {
         // Validate inputs
-        if (timePeriodHours < 1 || timePeriodHours > 168) {
-            throw new IllegalArgumentException("Time period must be between 1 and 168 hours");
+        if (timePeriodHours < 1 || timePeriodHours > 720) { // Max 30 days
+            throw new IllegalArgumentException("Time period must be between 1 and 720 hours (30 days)");
         }
 
         if (confidenceLevel < 0.5 || confidenceLevel > 0.99) {
@@ -359,10 +388,11 @@ public class PredictionService {
         Instant endTime = now.plusSeconds(timePeriodHours * 3600);
 
         // Log the prediction
-        log.debug("Price prediction for pool {}: current={}, range=[{}, {}], ticks=[{}, {}]",
+        log.debug("Price prediction for pool {}: current={}, range=[{}, {}], ticks=[{}, {}], duration={}h/{}d",
                 poolAddress, currentData.getToken0Price(),
                 prediction.getLowerBound(), prediction.getUpperBound(),
-                optimalTicks[0], optimalTicks[1]);
+                optimalTicks[0], optimalTicks[1],
+                timePeriodHours, durationDays != null ? durationDays : timePeriodHours / 24);
 
         return PredictionResponse.builder()
                 .lowerPriceRange(prediction.getLowerBound().doubleValue())
@@ -376,8 +406,14 @@ public class PredictionService {
                 .currentPrice(currentData.getToken0Price().doubleValue())
                 .predictedImpermanentLoss(impermanentLoss)
                 .predictionPeriodHours(timePeriodHours)
+                .predictionPeriodDays(durationDays != null ? durationDays : timePeriodHours / 24)
                 .predictionEndTime(endTime)
                 .build();
+    }
+
+    // For backward compatibility
+    public PredictionResponse predictPriceRange(String poolAddress, double confidenceLevel, int timePeriodHours) {
+        return predictPriceRange(poolAddress, confidenceLevel, timePeriodHours, null);
     }
 
     private double estimateFeesForRange(int lowerTick, int upperTick, String poolAddress, int timePeriodHours) {
@@ -406,6 +442,51 @@ public class PredictionService {
                 poolAddress, avgHourlyFees, rangeUtilization, timePeriodHours);
 
         return avgHourlyFees * timePeriodHours * rangeUtilization;
+    }
+
+    /**
+     * Calculate estimated profit from providing liquidity over a given period
+     * @param lowerTick Lower tick of position
+     * @param upperTick Upper tick of position
+     * @param poolAddress Pool address
+     * @param days Number of days for the position
+     * @return Estimated profit in USD
+     */
+    public double estimatePositionProfit(int lowerTick, int upperTick, String poolAddress, int days) {
+        int hours = days * 24;
+
+        // Estimated fees
+        double feesEarned = estimateFeesForRange(lowerTick, upperTick, poolAddress, hours);
+
+        // Get current pool data
+        PoolDataPoint currentData = dataCollectionService.getCurrentPoolData(poolAddress);
+
+        // Predict future price for impermanent loss calculation
+        BayesianPricePredictor pricePredictor = getOrCreateModel(poolAddress);
+        BayesianPricePredictor.PricePrediction prediction =
+                pricePredictor.predictPriceRange(currentData, 0.80, hours);
+
+        // Calculate impermanent loss as percentage
+        double impermanentLossPercent = estimateImpermanentLoss(
+                currentData.getToken0Price().doubleValue(),
+                prediction.getMedian().doubleValue(),
+                prediction.getStandardDeviation().doubleValue()
+        );
+
+        // Assume a standard liquidity amount for calculation
+        // This could be improved to take actual liquidity as input
+        double estimatedLiquidity = 10000.0; // Example amount in USD
+
+        // Calculate impermanent loss in USD
+        double impermanentLossUSD = (impermanentLossPercent / 100.0) * estimatedLiquidity;
+
+        // Calculate net profit
+        double netProfit = feesEarned - impermanentLossUSD;
+
+        log.debug("Profit estimation for pool {}, days={}: fees={}, IL={}, net={}",
+                poolAddress, days, feesEarned, impermanentLossUSD, netProfit);
+
+        return netProfit;
     }
 
     private double calculateRangeUtilization(int lowerTick, int upperTick, List<PoolDataPoint> historicalData) {
@@ -462,5 +543,66 @@ public class PredictionService {
                 .filter(entry -> entry.getValue().isModelReady())
                 .map(Map.Entry::getKey)
                 .collect(Collectors.toList());
+    }
+
+
+    /**
+     * Estimate fees for a position based on liquidity amount
+     */
+    public double estimateFeesForPosition(int lowerTick, int upperTick, String poolAddress,
+                                          int days, double liquidityAmount) {
+        int hours = days * 24;
+
+        // Calculate base fee estimation (as a percentage of total pool fees)
+        double baseFees = estimateFeesForRange(lowerTick, upperTick, poolAddress, hours);
+
+        // Get current pool data for total liquidity reference
+        PoolDataPoint currentData = dataCollectionService.getCurrentPoolData(poolAddress);
+        double totalPoolLiquidity = currentData.getLiquidity().doubleValue();
+
+        // Avoid division by zero
+        if (totalPoolLiquidity <= 0) {
+            return baseFees; // Fall back to base estimation
+        }
+
+        // Calculate position's share of total fees based on its proportion of liquidity
+        double liquidityShare = liquidityAmount / (totalPoolLiquidity + liquidityAmount);
+
+        return baseFees * liquidityShare;
+    }
+
+    /**
+     * Estimate impermanent loss for a position
+     */
+    public double estimateImpermanentLossForPosition(String poolAddress, int days, double liquidityAmount) {
+        // Get current pool data
+        PoolDataPoint currentData = dataCollectionService.getCurrentPoolData(poolAddress);
+        double currentPrice = currentData.getToken0Price().doubleValue();
+
+        // Predict future price
+        BayesianPricePredictor pricePredictor = getOrCreateModel(poolAddress);
+        BayesianPricePredictor.PricePrediction prediction =
+                pricePredictor.predictPriceRange(currentData, 0.80, days * 24);
+
+        // Calculate impermanent loss as percentage
+        double ilPercent = estimateImpermanentLoss(
+                currentPrice,
+                prediction.getMedian().doubleValue(),
+                prediction.getStandardDeviation().doubleValue()
+        );
+
+        // Convert percentage to USD amount
+        return (ilPercent / 100.0) * liquidityAmount;
+    }
+
+    /**
+     * Helper methods for token information
+     */
+    public String getTokenAddress(String poolAddress, String tokenIndex) throws IOException {
+        return blockchainService.getTokenAddress(poolAddress, tokenIndex);
+    }
+
+    public String getTokenSymbol(String tokenAddress) {
+        return blockchainService.getTokenSymbol(tokenAddress);
     }
 }

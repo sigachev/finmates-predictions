@@ -19,5 +19,7 @@ public class PredictionResponse {
     private double currentPrice;
     private double predictedImpermanentLoss;
     private int predictionPeriodHours;
+    private int predictionPeriodDays;  // New field for days
     private Instant predictionEndTime;
+    private double estimatedProfit;    // New field for estimated profit
 }

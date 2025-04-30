@@ -20,7 +20,9 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -35,26 +37,35 @@ public class BayesianPricePredictor {
     private final int NUM_OUTPUTS = 4;        // Mean & std for both lower and upper bounds
     private final int sequenceLength;         // Hours of data to use for prediction
     private final int hiddenLayerSize;        // Size of hidden layers
-    private final int NUM_EPOCHS = 10;       // Training epochs
+    private final int NUM_EPOCHS;             // Training epochs
     private final double LEARNING_RATE = 0.001;
     private final double MC_DROPOUT_RATE = 0.2; // Dropout rate for Monte Carlo sampling
     private final int MC_SAMPLES = 100;        // Number of Monte Carlo samples for uncertainty
 
     // Default constructor for backward compatibility
     public BayesianPricePredictor() {
-        this(24, 64); // Default values
+        this(24, 64, 10); // Default values
     }
 
     // Constructor with configurable parameters
     public BayesianPricePredictor(int sequenceLength, int hiddenLayerSize) {
+        this(sequenceLength, hiddenLayerSize, 10); // Default epochs
+    }
+
+    // Constructor with all configurable parameters
+    public BayesianPricePredictor(int sequenceLength, int hiddenLayerSize, int epochs) {
         if (sequenceLength <= 0) {
             throw new IllegalArgumentException("Sequence length must be positive, got: " + sequenceLength);
         }
         if (hiddenLayerSize <= 0) {
             throw new IllegalArgumentException("Hidden layer size must be positive, got: " + hiddenLayerSize);
         }
+        if (epochs <= 0) {
+            throw new IllegalArgumentException("Number of epochs must be positive, got: " + epochs);
+        }
         this.sequenceLength = sequenceLength;
         this.hiddenLayerSize = hiddenLayerSize;
+        this.NUM_EPOCHS = epochs;
         buildModel();
     }
 
@@ -311,6 +322,9 @@ public class BayesianPricePredictor {
         return Math.min(1.0, Math.sqrt(variance));
     }
 
+    /**
+     * Enhanced prediction method for longer time periods
+     */
     public PricePrediction predictPriceRange(PoolDataPoint currentData, double confidenceLevel, int timePeriodHours) {
         try {
             if (currentData == null || currentData.getToken0Price() == null) {
@@ -322,34 +336,41 @@ public class BayesianPricePredictor {
                 throw new IllegalArgumentException("Invalid current price: " + currentPrice);
             }
 
+            // For longer time periods, adjust volatility scaling factor
+            double volatilityScalingFactor = calculateVolatilityScalingFactor(timePeriodHours);
+
             double volatility = currentData.getVolatility24h() != null ?
                     currentData.getVolatility24h().doubleValue() : 0.1;
 
-            double standardDeviation = volatility * Math.sqrt(timePeriodHours / 24.0);
+            // Scale volatility based on prediction horizon with square root of time
+            double scaledVolatility = volatility * Math.sqrt(timePeriodHours / 24.0) * volatilityScalingFactor;
             double zScore = calculateZScore(confidenceLevel);
 
-            double lowerBound = currentPrice * (1 - zScore * standardDeviation);
-            double upperBound = currentPrice * (1 + zScore * standardDeviation);
-            double median = currentPrice;
+            // For long-term predictions, use MC samples for more accuracy
+            if (timePeriodHours > 72) {
+                return performMonteCarloSimulation(currentPrice, scaledVolatility, zScore, timePeriodHours, confidenceLevel);
+            } else {
+                // Standard calculation for shorter horizons
+                double lowerBound = currentPrice * (1 - zScore * scaledVolatility);
+                double upperBound = currentPrice * (1 + zScore * scaledVolatility);
+                double median = currentPrice;
 
-            if (Double.isNaN(lowerBound) || Double.isInfinite(lowerBound)) {
-                lowerBound = currentPrice * 0.9;
-            }
-            if (Double.isNaN(upperBound) || Double.isInfinite(upperBound)) {
-                upperBound = currentPrice * 1.1;
-            }
+                if (Double.isNaN(lowerBound) || Double.isInfinite(lowerBound)) {
+                    lowerBound = currentPrice * 0.9;
+                }
+                if (Double.isNaN(upperBound) || Double.isInfinite(upperBound)) {
+                    upperBound = currentPrice * 1.1;
+                }
 
-            return new PricePrediction(
-                    BigDecimal.valueOf(Math.max(0, lowerBound)),
-                    BigDecimal.valueOf(Math.max(0, upperBound)),
-                    BigDecimal.valueOf(median),
-                    BigDecimal.valueOf(standardDeviation)
-            );
+                return new PricePrediction(
+                        BigDecimal.valueOf(Math.max(0, lowerBound)),
+                        BigDecimal.valueOf(Math.max(0, upperBound)),
+                        BigDecimal.valueOf(median),
+                        BigDecimal.valueOf(scaledVolatility)
+                );
+            }
         } catch (Exception e) {
-            log.error("Error in price prediction: " + e.getMessage() +
-                    ", Current Data: " + currentData +
-                    ", Confidence Level: " + confidenceLevel +
-                    ", Time Period: " + timePeriodHours, e);
+            log.error("Error in price prediction: " + e.getMessage(), e);
 
             double fallbackLower = currentData.getToken0Price().doubleValue() * 0.9;
             double fallbackUpper = currentData.getToken0Price().doubleValue() * 1.1;
@@ -361,6 +382,150 @@ public class BayesianPricePredictor {
                     BigDecimal.valueOf(0.1)
             );
         }
+    }
+
+    /**
+     * Legacy method for backward compatibility
+     */
+    public PricePrediction predictPriceRange(PoolDataPoint currentData, double confidenceLevel, int timePeriodHours, boolean useLegacyMethod) {
+        if (useLegacyMethod) {
+            try {
+                if (currentData == null || currentData.getToken0Price() == null) {
+                    throw new IllegalArgumentException("Current price data is null or invalid");
+                }
+
+                double currentPrice = currentData.getToken0Price().doubleValue();
+                if (Double.isNaN(currentPrice) || Double.isInfinite(currentPrice) || currentPrice <= 0) {
+                    throw new IllegalArgumentException("Invalid current price: " + currentPrice);
+                }
+
+                double volatility = currentData.getVolatility24h() != null ?
+                        currentData.getVolatility24h().doubleValue() : 0.1;
+
+                double standardDeviation = volatility * Math.sqrt(timePeriodHours / 24.0);
+                double zScore = calculateZScore(confidenceLevel);
+
+                double lowerBound = currentPrice * (1 - zScore * standardDeviation);
+                double upperBound = currentPrice * (1 + zScore * standardDeviation);
+                double median = currentPrice;
+
+                if (Double.isNaN(lowerBound) || Double.isInfinite(lowerBound)) {
+                    lowerBound = currentPrice * 0.9;
+                }
+                if (Double.isNaN(upperBound) || Double.isInfinite(upperBound)) {
+                    upperBound = currentPrice * 1.1;
+                }
+
+                return new PricePrediction(
+                        BigDecimal.valueOf(Math.max(0, lowerBound)),
+                        BigDecimal.valueOf(Math.max(0, upperBound)),
+                        BigDecimal.valueOf(median),
+                        BigDecimal.valueOf(standardDeviation)
+                );
+            } catch (Exception e) {
+                log.error("Error in price prediction: " + e.getMessage() +
+                        ", Current Data: " + currentData +
+                        ", Confidence Level: " + confidenceLevel +
+                        ", Time Period: " + timePeriodHours, e);
+
+                double fallbackLower = currentData.getToken0Price().doubleValue() * 0.9;
+                double fallbackUpper = currentData.getToken0Price().doubleValue() * 1.1;
+
+                return new PricePrediction(
+                        BigDecimal.valueOf(fallbackLower),
+                        BigDecimal.valueOf(fallbackUpper),
+                        currentData.getToken0Price(),
+                        BigDecimal.valueOf(0.1)
+                );
+            }
+        } else {
+            return predictPriceRange(currentData, confidenceLevel, timePeriodHours);
+        }
+    }
+
+    /**
+     * Calculate volatility scaling factor for long-term predictions
+     * Uses mean reversion factor for longer horizons
+     */
+    private double calculateVolatilityScalingFactor(int timePeriodHours) {
+        // For periods > 7 days, apply mean reversion factor
+        if (timePeriodHours > 168) {
+            // Mean reversion factor (diminishing volatility growth over time)
+            double daysParam = timePeriodHours / 24.0;
+            // This formula reduces the rate of volatility growth for long periods
+            return 0.8 + (0.6 * Math.tanh(daysParam / 30.0));
+        }
+        return 1.0;
+    }
+
+    /**
+     * Perform Monte Carlo simulation for more accurate long-term predictions
+     */
+    private PricePrediction performMonteCarloSimulation(
+            double currentPrice, double volatility, double zScore, int timePeriodHours, double confidenceLevel) {
+
+        int numSimulations = MC_SAMPLES;
+        double[] finalPrices = new double[numSimulations];
+
+        // Generate random paths
+        Random random = new Random();
+        double dt = 1.0 / 24.0; // 1-hour steps
+        double sqrtDt = Math.sqrt(dt);
+
+        for (int i = 0; i < numSimulations; i++) {
+            double price = currentPrice;
+
+            // Simulate price path
+            for (int hour = 0; hour < timePeriodHours; hour++) {
+                // Use GBM (Geometric Brownian Motion) with mean reversion
+                double drift = 0.0; // Assuming neutral drift
+                double diffusion = volatility * sqrtDt * random.nextGaussian();
+
+                // Apply mean reversion for longer simulations
+                if (hour > 24) {
+                    double meanReversionStrength = 0.02; // Strength of mean reversion
+                    drift += meanReversionStrength * (currentPrice - price) * dt;
+                }
+
+                // Update price
+                price *= (1 + drift + diffusion);
+
+                // Floor at zero
+                if (price <= 0) price = 0.00001;
+            }
+
+            finalPrices[i] = price;
+        }
+
+        // Sort results to find percentiles
+        Arrays.sort(finalPrices);
+
+        // Calculate bounds based on confidence level
+        int lowerIndex = (int)(numSimulations * (1 - confidenceLevel) / 2);
+        int upperIndex = (int)(numSimulations * (1 + confidenceLevel) / 2);
+        int medianIndex = numSimulations / 2;
+
+        // Ensure indices are within bounds
+        lowerIndex = Math.max(0, lowerIndex);
+        upperIndex = Math.min(numSimulations - 1, upperIndex);
+
+        double lowerBound = finalPrices[lowerIndex];
+        double upperBound = finalPrices[upperIndex];
+        double median = finalPrices[medianIndex];
+
+        // Calculate standard deviation
+        double sum = 0.0;
+        for (double price : finalPrices) {
+            sum += Math.pow(price - median, 2);
+        }
+        double stdDev = Math.sqrt(sum / numSimulations);
+
+        return new PricePrediction(
+                BigDecimal.valueOf(Math.max(0, lowerBound)),
+                BigDecimal.valueOf(Math.max(0, upperBound)),
+                BigDecimal.valueOf(median),
+                BigDecimal.valueOf(stdDev)
+        );
     }
 
     private double calculateZScore(double confidenceLevel) {

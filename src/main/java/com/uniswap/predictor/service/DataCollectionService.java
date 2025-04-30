@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -84,6 +85,10 @@ public class DataCollectionService {
         }
     }
 
+
+    /**
+     * Collect historical data with pagination support for longer timeframes
+     */
     public List<PoolDataPoint> collectHistoricalData(String poolAddress, Instant startTime, Instant endTime) {
         try {
             log.debug("Collecting historical data for {} from {} to {}",
@@ -91,33 +96,82 @@ public class DataCollectionService {
 
             List<PoolDataPoint> historicalData = new ArrayList<>();
 
-            // Fetch historical swap and liquidity events asynchronously
-            CompletableFuture<List<GraphQLService.SwapEvent>> swapsFuture = CompletableFuture.supplyAsync(() ->
-                    graphQLService.getHistoricalSwaps(poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
+            // Calculate how many days we're requesting
+            long daysDifference = Duration.between(startTime, endTime).toDays();
 
-            CompletableFuture<List<GraphQLService.LiquidityEvent>> liquidityFuture = CompletableFuture.supplyAsync(() ->
-                    graphQLService.getHistoricalLiquidity(poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
+            // For large time periods, paginate the requests to avoid timeouts
+            if (daysDifference > 7) {
+                // Collect data in 7-day chunks
+                Instant chunkStart = startTime;
+                while (chunkStart.isBefore(endTime)) {
+                    // Calculate end of this chunk (either 7 days later or endTime)
+                    Instant chunkEnd = chunkStart.plus(Duration.ofDays(7));
+                    if (chunkEnd.isAfter(endTime)) {
+                        chunkEnd = endTime;
+                    }
 
-            // Wait for futures to complete with timeout
-            List<GraphQLService.SwapEvent> swapEvents = swapsFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
-            List<GraphQLService.LiquidityEvent> liquidityEvents = liquidityFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+                    log.debug("Collecting data chunk from {} to {}", chunkStart, chunkEnd);
 
-            // Process the retrieved events
-            processHistoricalEvents(historicalData, swapEvents, liquidityEvents, poolAddress);
+                    // Fetch this chunk
+                    List<PoolDataPoint> chunkData = fetchHistoricalDataChunk(
+                            poolAddress, chunkStart, chunkEnd);
+
+                    historicalData.addAll(chunkData);
+
+                    // Move to next chunk
+                    chunkStart = chunkEnd;
+                }
+            } else {
+                // For shorter periods, fetch in one request
+                historicalData = fetchHistoricalDataChunk(poolAddress, startTime, endTime);
+            }
 
             log.debug("Collected {} historical data points for {}",
                     historicalData.size(), poolAddress);
 
             return historicalData;
-
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            log.error("Error collecting historical data for pool {}: {}", poolAddress, e.getMessage());
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            throw new RuntimeException("Error collecting historical data for pool: " + poolAddress, e);
+        } catch (Exception e) {
+            log.error("Error collecting historical data for pool {}: {}",
+                    poolAddress, e.getMessage());
+            throw new RuntimeException("Error collecting historical data", e);
         }
     }
+
+    /**
+     * Fetch a single chunk of historical data
+     */
+    private List<PoolDataPoint> fetchHistoricalDataChunk(
+            String poolAddress, Instant startTime, Instant endTime) {
+        try {
+            List<PoolDataPoint> result = new ArrayList<>();
+
+            // Fetch historical swap and liquidity events asynchronously
+            CompletableFuture<List<GraphQLService.SwapEvent>> swapsFuture =
+                    CompletableFuture.supplyAsync(() -> graphQLService.getHistoricalSwaps(
+                            poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
+
+            CompletableFuture<List<GraphQLService.LiquidityEvent>> liquidityFuture =
+                    CompletableFuture.supplyAsync(() -> graphQLService.getHistoricalLiquidity(
+                            poolAddress, startTime.getEpochSecond(), endTime.getEpochSecond()));
+
+            // Wait for futures to complete with timeout
+            List<GraphQLService.SwapEvent> swapEvents =
+                    swapsFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+
+            List<GraphQLService.LiquidityEvent> liquidityEvents =
+                    liquidityFuture.get(asyncTimeoutSeconds, TimeUnit.SECONDS);
+
+            // Process the retrieved events
+            processHistoricalEvents(result, swapEvents, liquidityEvents, poolAddress);
+
+            return result;
+        } catch (Exception e) {
+            log.error("Error fetching data chunk: {}", e.getMessage());
+            throw new RuntimeException("Error fetching historical data chunk", e);
+        }
+    }
+
+
 
     private void processHistoricalEvents(List<PoolDataPoint> result,
                                          List<GraphQLService.SwapEvent> swapEvents,

@@ -1,118 +1,52 @@
-# finmates-predictions
-
 # Uniswap V3 Price Predictor
 
-A Spring Boot application that predicts price ranges and optimal liquidity positions for Uniswap V3 pools using Bayesian machine learning.
+A sophisticated Spring Boot application for predicting price ranges, optimizing liquidity positions, and calculating potential profitability for Uniswap V3 pools.
 
 ## Overview
 
-This service predicts price ranges for Uniswap V3 pools with specified confidence levels and time periods. It dynamically calculates the optimal tick ranges for liquidity provision based on properly adjusted token decimals and fee tiers.
+This application uses advanced machine learning techniques including Bayesian modeling and Monte Carlo simulations to predict cryptocurrency price ranges and help liquidity providers optimize their positions on Uniswap V3. By analyzing historical data and current market conditions, it provides predictions with customizable confidence intervals and time horizons.
 
 ## Key Features
 
-- **Dynamic Token Decimal Handling**: Properly fetches and handles token decimals for accurate price calculations
-- **Fee Tier Detection**: Determines the correct tick spacing based on the pool's fee tier
-- **Bayesian Price Prediction**: Uses a Bayesian neural network to predict price ranges with uncertainty quantification
-- **Optimal Tick Calculation**: Calculates optimal tick ranges for liquidity provision
-- **Fee and Impermanent Loss Estimation**: Estimates fees and potential impermanent loss for provided liquidity
-- **Historical Data Analysis**: Collects and analyzes historical swap and liquidity events
-- **Asynchronous Training**: Trains models asynchronously without blocking API responses
-- **Resilient Blockchain Connectivity**: Multiple RPC endpoints with fallback mechanisms
+### Price Prediction
+- Predict price ranges for any Uniswap V3 pool with configurable confidence intervals
+- Support for both short-term (hours) and long-term (up to 30 days) forecasting
+- Advanced Monte Carlo simulations for improved accuracy in long-term predictions
+- Mean reversion modeling for realistic extended forecasts
 
-## Components
+### Position Optimization
+- Calculate optimal tick ranges for liquidity provision
+- Estimate fees, impermanent loss, and overall position profitability
+- Generate time-based profit projections for different position durations
+- Analyze historical price movements to maximize range utilization
 
-### Core Services
+### Data Analysis
+- Collect and analyze historical pool data from both on-chain sources and The Graph
+- Configurable training on variable amounts of historical data (Y days parameter)
+- Real-time data collection with resilient fallback mechanisms
+- Proper handling of token decimals and fee tiers for accurate calculations
 
-1. **BlockchainService**: Interacts with the Ethereum blockchain to fetch on-chain data
-    - Correctly handles token decimal differences for accurate price calculations
-    - Dynamically detects fee tiers and corresponding tick spacings
-    - Implements robust error handling and retry mechanisms
+## Technical Stack
 
-2. **GraphQLService**: Retrieves historical data from The Graph subgraphs
-    - Fetches swap events, liquidity events, volume, fees, and volatility metrics
-
-3. **DataCollectionService**: Combines blockchain and subgraph data
-    - Processes historical events to create comprehensive data points
-    - Calculates metrics like volatility, fees, and volume
-
-4. **PredictionService**: Manages price prediction models
-    - Trains Bayesian neural networks to predict price ranges
-    - Estimates fees and impermanent loss
-    - Calculates optimal liquidity positions
-
-### Key Fixes Implemented
-
-- **Token Decimal Handling**: Now dynamically fetches token decimals from ERC20 contracts instead of using hardcoded values
-- **Support for Various Token Types**: Added fallback mechanisms for non-standard ERC20 token implementations
-- **Improved Price Calculations**: Properly adjusts prices based on token decimal differences
-- **Dynamic Fee Tier Detection**: Determines the correct tick spacing based on the pool's fee tier
-- **Enhanced Error Handling**: Added retry logic and fallback mechanisms for blockchain RPC calls
-- **Stablecoin Detection**: Special handling for known stablecoin addresses when direct decimal retrieval fails
-- **Improved Logging**: Comprehensive logging for easier debugging and monitoring
-- **HTTP Client Optimization**: Configured timeout and connection pooling for improved resilience
-
-## API Endpoints
-
-### Prediction Endpoints
-
-- `GET /api/v1/prediction/price-range/{poolAddress}?confidenceLevel=0.95&timePeriodHours=24` - Get price range prediction
-- `POST /api/v1/prediction/price-range` - Get price range prediction (request body)
-- `GET /api/v1/prediction/status` - Get status of the default model
-- `GET /api/v1/prediction/status/{poolAddress}` - Get status of a specific pool model
-- `POST /api/v1/prediction/retrain` - Trigger model retraining
-- `GET /api/v1/prediction/progress/{poolAddress}` - Get detailed training progress
-
-### Pool Endpoints
-
-- `GET /api/v1/pools` - Get list of available (trained) pools
-- `GET /api/v1/pools/{poolAddress}/info` - Get current information about a pool
-- `POST /api/v1/pools/track` - Start tracking and training model for a new pool
+- **Framework**: Spring Boot
+- **Machine Learning**: DeepLearning4J
+- **Blockchain Integration**: Web3j
+- **Data Sources**: Arbitrum RPC, The Graph API
+- **Statistical Methods**: Bayesian modeling, Monte Carlo simulation, volatility scaling
 
 ## Configuration
 
-Key configuration options in `application.properties`:
+Key configuration parameters in `application.properties`:
 
 ```properties
-# Blockchain RPC endpoints
-arbitrum.rpc=https://arb1.arbitrum.io/rpc
-arbitrum.rpc.backup1=https://arbitrum-one.public.blastapi.io
-arbitrum.rpc.backup2=https://rpc.ankr.com/arbitrum
+# ML model configuration
+model.training.days=30             # Historical days for model training (Y parameter)
+model.retraining.schedule.hours=24 # Automatic model retraining interval
+model.epochs=10                    # Training epochs
+model.sequence.length=48           # Sequence length for predictions
+model.mc.samples=100               # Monte Carlo simulation samples
 
-# Default pool and fee
+# Blockchain configuration
+arbitrum.rpc=https://arb1.arbitrum.io/rpc
 uniswap.default.pool=0x641C00A822e8b671738d32a431a4Fb6074E5c79d
 uniswap.default.fee=500
-
-# Model parameters
-model.retraining.schedule.hours=24
-model.historical.days=30
-model.epochs=10
-```
-
-## Dependencies
-
-- Spring Boot 3.x
-- Web3j for Ethereum interaction
-- Jackson for JSON processing
-- Deeplearning4j for neural network implementation
-- Apache HTTP Components for HTTP client
-- Lombok for boilerplate reduction
-
-## Running the Application
-
-```bash
-# Build the application
-./mvnw clean package
-
-# Run the application
-java -jar target/uniswap-predictor-1.0.0.jar
-```
-
-## Docker Support
-
-```bash
-# Build Docker image
-docker build -t uniswap-predictor .
-
-# Run Docker container
-docker run -p 8089:8089 uniswap-predictor
-```
