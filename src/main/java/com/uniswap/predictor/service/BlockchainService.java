@@ -126,7 +126,8 @@ public class BlockchainService {
         Function function = new Function(
                 "liquidity",
                 Collections.emptyList(),
-                Collections.singletonList(new TypeReference<Uint128>() {})
+                Collections.singletonList(new TypeReference<Uint128>() {
+                })
         );
 
         String result = callContract(poolAddress, function);
@@ -143,14 +144,21 @@ public class BlockchainService {
                 "slot0",
                 Collections.emptyList(),
                 Arrays.asList(
-                        new TypeReference<Uint160>() {}, // sqrtPriceX96
-                        new TypeReference<Int24>() {},   // tick
+                        new TypeReference<Uint160>() {
+                        }, // sqrtPriceX96
+                        new TypeReference<Int24>() {
+                        },   // tick
                         // Other Slot0 parameters we don't need right now
-                        new TypeReference<Uint16>() {},  // observationIndex
-                        new TypeReference<Uint16>() {},  // observationCardinality
-                        new TypeReference<Uint16>() {},  // observationCardinalityNext
-                        new TypeReference<Uint8>() {},   // feeProtocol
-                        new TypeReference<Bool>() {}     // unlocked
+                        new TypeReference<Uint16>() {
+                        },  // observationIndex
+                        new TypeReference<Uint16>() {
+                        },  // observationCardinality
+                        new TypeReference<Uint16>() {
+                        },  // observationCardinalityNext
+                        new TypeReference<Uint8>() {
+                        },   // feeProtocol
+                        new TypeReference<Bool>() {
+                        }     // unlocked
                 )
         );
 
@@ -181,7 +189,7 @@ public class BlockchainService {
 
     public double calculatePrice(BigInteger sqrtPriceX96, String poolAddress, boolean token0ToToken1) {
         try {
-            log.debug("Raw sqrtPriceX96: {}", sqrtPriceX96);
+            //log.debug("Raw sqrtPriceX96: {}", sqrtPriceX96);
             // Handle null or zero price case
             if (sqrtPriceX96 == null || sqrtPriceX96.equals(BigInteger.ZERO)) {
                 log.warn("Invalid sqrtPriceX96 value for pool {}: {}", poolAddress, sqrtPriceX96);
@@ -196,9 +204,9 @@ public class BlockchainService {
             int baseTokenDecimals = getTokenDecimals(baseTokenAddress);
             int quoteTokenDecimals = getTokenDecimals(quoteTokenAddress);
 
-            log.debug("Token decimals - Base({}): {}, Quote({}): {}",
+            /*log.debug("Token decimals - Base({}): {}, Quote({}): {}",
                     baseTokenAddress, baseTokenDecimals,
-                    quoteTokenAddress, quoteTokenDecimals);
+                    quoteTokenAddress, quoteTokenDecimals);*/
 
             // Calculate raw price from sqrtPriceX96
             BigDecimal q96 = new BigDecimal(BigInteger.ONE.shiftLeft(96));
@@ -212,14 +220,13 @@ public class BlockchainService {
             }
 
 
-
             // Adjust for decimal places
             int decimalAdjustment = Math.abs(quoteTokenDecimals - baseTokenDecimals);
 
-            log.debug("Base token decimals: {}", baseTokenDecimals);
-            log.debug("Quote token decimals: {}", quoteTokenDecimals);
-            log.debug("Raw price (after sqrt): {}", price);
-            log.debug("Decimal adjustment: {}", decimalAdjustment);
+            //log.debug("Base token decimals: {}", baseTokenDecimals);
+            //log.debug("Quote token decimals: {}", quoteTokenDecimals);
+            // log.debug("Raw price (after sqrt): {}", price);
+            //log.debug("Decimal adjustment: {}", decimalAdjustment);
 
             if (decimalAdjustment != 0) {
                 BigDecimal decimalFactor = BigDecimal.TEN.pow(Math.abs(decimalAdjustment));
@@ -230,7 +237,7 @@ public class BlockchainService {
                 }
             }
 
-            log.debug("Final adjusted price: {}", price);
+            //log.debug("Final adjusted price: {}", price);
 
             // For token1/token0 price, return as is
             if (token0ToToken1) {
@@ -254,7 +261,8 @@ public class BlockchainService {
                 Function tokenFunction = new Function(
                         "token" + token,
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<Address>() {})
+                        Collections.singletonList(new TypeReference<Address>() {
+                        })
                 );
                 String result = callContract(address, tokenFunction);
                 log.debug("Token{} address for pool {}: {}", token, address, result);
@@ -274,7 +282,8 @@ public class BlockchainService {
                 Function function = new Function(
                         ERC20_SYMBOL_FUNCTION,
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<org.web3j.abi.datatypes.Utf8String>() {})
+                        Collections.singletonList(new TypeReference<org.web3j.abi.datatypes.Utf8String>() {
+                        })
                 );
 
                 String result = callContract(address, function);
@@ -293,13 +302,14 @@ public class BlockchainService {
     }
 
     // Get the fee tier for a pool to determine the correct tick spacing
-    private int getPoolFeeTier(String poolAddress) {
+    public int getPoolFeeTier(String poolAddress) {
         return poolFeeCache.computeIfAbsent(poolAddress, address -> {
             try {
                 Function function = new Function(
                         "fee",
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<Uint24>() {})
+                        Collections.singletonList(new TypeReference<Uint24>() {
+                        })
                 );
 
                 String result = callContract(address, function);
@@ -414,7 +424,8 @@ public class BlockchainService {
                 Function function = new Function(
                         ERC20_DECIMALS_FUNCTION,
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<Uint8>() {})
+                        Collections.singletonList(new TypeReference<Uint8>() {
+                        })
                 );
 
                 String result = null;
@@ -435,7 +446,8 @@ public class BlockchainService {
                 function = new Function(
                         ERC20_DECIMALS_FUNCTION,
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<Uint256>() {})
+                        Collections.singletonList(new TypeReference<Uint256>() {
+                        })
                 );
 
                 try {
@@ -455,7 +467,8 @@ public class BlockchainService {
                 function = new Function(
                         ERC20_DECIMALS_FUNCTION,
                         Collections.emptyList(),
-                        Collections.singletonList(new TypeReference<Bytes32>() {})
+                        Collections.singletonList(new TypeReference<Bytes32>() {
+                        })
                 );
 
                 try {

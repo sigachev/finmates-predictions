@@ -5,11 +5,13 @@ import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
 import org.deeplearning4j.nn.conf.WorkspaceMode;
+import org.deeplearning4j.nn.conf.graph.MergeVertex;
 import org.deeplearning4j.nn.conf.inputs.InputType;
-import org.deeplearning4j.nn.conf.layers.GravesLSTM;
+import org.deeplearning4j.nn.conf.layers.*;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.learning.config.Adam;
+import org.nd4j.linalg.lossfunctions.LossFunctions;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -91,11 +93,10 @@ public class AppConfig {
                 .trainingWorkspaceMode(WorkspaceMode.ENABLED)
                 .inferenceWorkspaceMode(WorkspaceMode.ENABLED)
                 .graphBuilder()
-                // Specify input type with sequence length
                 .addInputs("input")
                 .setInputTypes(InputType.recurrent(NUM_FEATURES, sequenceLength))
 
-                // First LSTM layer with specified sequence length
+                // First LSTM layer
                 .addLayer("lstm1", new GravesLSTM.Builder()
                         .nIn(NUM_FEATURES)
                         .nOut(hiddenLayerSize)
@@ -103,8 +104,68 @@ public class AppConfig {
                         .gateActivationFunction(Activation.SIGMOID)
                         .build(), "input")
 
-                // ... rest of the layers remain the same ...
+                // Add dropout after first LSTM
+                .addLayer("dropout1", new DropoutLayer.Builder(dropoutRate)
+                        .build(), "lstm1")
+
+                // Second LSTM layer with reduced size
+                .addLayer("lstm2", new GravesLSTM.Builder()
+                        .nIn(hiddenLayerSize)
+                        .nOut(hiddenLayerSize/2)
+                        .activation(Activation.TANH)
+                        .gateActivationFunction(Activation.SIGMOID)
+                        .build(), "dropout1")
+
+                // Add dropout after second LSTM
+                .addLayer("dropout2", new DropoutLayer.Builder(dropoutRate)
+                        .build(), "lstm2")
+
+                // Third LSTM layer for deeper feature extraction
+                .addLayer("lstm3", new GravesLSTM.Builder()
+                        .nIn(hiddenLayerSize/2)
+                        .nOut(hiddenLayerSize/2)
+                        .activation(Activation.TANH)
+                        .gateActivationFunction(Activation.SIGMOID)
+                        .build(), "dropout2")
+
+                // Dense layer for feature combination
+                .addLayer("dense1", new DenseLayer.Builder()
+                        .nIn(hiddenLayerSize/2)
+                        .nOut(hiddenLayerSize/4)
+                        .activation(Activation.RELU)
+                        .build(), "lstm3")
+
+                // Batch normalization for training stability
+                .addLayer("batchnorm1", new BatchNormalization.Builder()
+                        .build(), "dense1")
+
+                // Second dense layer
+                .addLayer("dense2", new DenseLayer.Builder()
+                        .nIn(hiddenLayerSize/4)
+                        .nOut(hiddenLayerSize/4)
+                        .activation(Activation.RELU)
+                        .build(), "batchnorm1")
+
+                // Final batch normalization
+                .addLayer("batchnorm2", new BatchNormalization.Builder()
+                        .build(), "dense2")
+
+                // Output layer for predictions
+                .addLayer("output", new RnnOutputLayer.Builder()
+                        .nIn(hiddenLayerSize/4)
+                        .nOut(NUM_OUTPUTS)
+                        .activation(Activation.IDENTITY)
+                        .lossFunction(LossFunctions.LossFunction.MSE)
+                        .build(), "batchnorm2")
+
+                .setOutputs("output")
+
+                // Add skip connections using merge vertices
+                .addVertex("merge1", new MergeVertex(), "lstm1", "lstm2")
+                .addVertex("merge2", new MergeVertex(), "lstm2", "lstm3")
+
                 .build();
     }
+
 
 }

@@ -3,6 +3,8 @@ package com.uniswap.predictor.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import lombok.Builder;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -15,7 +17,9 @@ import org.springframework.web.client.RestTemplate;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -392,4 +396,295 @@ public class GraphQLService {
     }
 
 
+    /**
+     * Get liquidity distribution across ticks for a pool
+     *
+     * @param poolAddress The Uniswap V3 pool address
+     * @return Map of tick indices to liquidity amounts
+     */
+    public Map<Integer, Double> getTickLiquidityDistribution(String poolAddress) {
+        Map<Integer, Double> result = new HashMap<>();
+
+        try {
+            // Query for ticks data from the pool
+            String query = String.format(
+                    "{ ticks(where: { pool: \"%s\" }, orderBy: tickIdx) { " +
+                            "  tickIdx " +
+                            "  liquidityNet " +
+                            "  liquidityGross " +
+                            "} }",
+                    poolAddress.toLowerCase()
+            );
+
+            log.debug("Executing GraphQL query for tick distribution");
+
+            JsonNode response = executeQuery(query);
+
+            if (response != null && response.has("data") &&
+                    response.get("data").has("ticks")) {
+
+                JsonNode ticks = response.get("data").get("ticks");
+                log.debug("Retrieved {} ticks from GraphQL", ticks.size());
+
+                // Process tick data
+                for (JsonNode tick : ticks) {
+                    int tickIdx = tick.get("tickIdx").asInt();
+                    BigDecimal liquidityGross = new BigDecimal(tick.get("liquidityGross").asText());
+
+                    // Convert to double and store
+                    result.put(tickIdx, liquidityGross.doubleValue());
+                }
+
+                log.debug("Processed tick data: {} entries", result.size());
+            } else {
+                log.warn("No tick data returned from GraphQL query");
+            }
+        } catch (Exception e) {
+            log.error("Error retrieving tick distribution: {}", e.getMessage(), e);
+        }
+
+        return result;
+    }
+
+
+    // ... (keep all your existing code up to the last closing brace)
+
+    /**
+     * Enhanced query execution with retries and error handling
+     */
+    private JsonNode executeQueryWithRetries(String query, int maxRetries) {
+        int attempts = 0;
+        long retryDelayMs = 1000; // Start with 1 second delay
+
+        while (attempts < maxRetries) {
+            try {
+                JsonNode response = executeQuery(query);
+
+                // Check for GraphQL errors
+                if (response.has("errors")) {
+                    JsonNode errors = response.get("errors");
+                    log.warn("GraphQL returned errors: {}", errors);
+
+                    // Check if error is retryable
+                    if (isRetryableError(errors)) {
+                        throw new RetryableGraphQLException("Retryable GraphQL error");
+                    }
+                }
+
+                return response;
+            } catch (Exception e) {
+                attempts++;
+                if (attempts >= maxRetries) {
+                    log.error("Failed to execute query after {} attempts", maxRetries);
+                    throw new RuntimeException("Failed to execute GraphQL query", e);
+                }
+
+                // Exponential backoff
+                try {
+                    Thread.sleep(retryDelayMs);
+                    retryDelayMs *= 2; // Double the delay for next attempt
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Query execution interrupted", ie);
+                }
+            }
+        }
+
+        throw new RuntimeException("Failed to execute query after " + maxRetries + " attempts");
+    }
+
+    private boolean isRetryableError(JsonNode errors) {
+        // Add logic to determine if error is retryable
+        // Example: rate limits, temporary network issues, etc.
+        for (JsonNode error : errors) {
+            String message = error.get("message").asText().toLowerCase();
+            if (message.contains("rate limit") ||
+                    message.contains("timeout") ||
+                    message.contains("try again")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Get detailed pool information
+     */
+    public PoolInfo getPoolInfo(String poolAddress) {
+        String query = String.format(
+                """
+                        {
+                          pool(id: "%s") {
+                            token0 {
+                              symbol
+                              decimals
+                            }
+                            token1 {
+                              symbol
+                              decimals
+                            }
+                            feeTier
+                            liquidity
+                            sqrtPrice
+                            tick
+                            volumeUSD
+                            feesUSD
+                            totalValueLockedUSD
+                          }
+                        }
+                        """,
+                poolAddress.toLowerCase()
+        );
+
+        try {
+            JsonNode response = executeQueryWithRetries(query, 3);
+            return parsePoolInfo(response);
+        } catch (Exception e) {
+            log.error("Error fetching pool info: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private PoolInfo parsePoolInfo(JsonNode response) {
+        if (response != null && response.has("data") &&
+                response.get("data").has("pool")) {
+
+            JsonNode pool = response.get("data").get("pool");
+
+            return PoolInfo.builder()
+                    .token0Symbol(pool.get("token0").get("symbol").asText())
+                    .token1Symbol(pool.get("token1").get("symbol").asText())
+                    .token0Decimals(pool.get("token0").get("decimals").asInt())
+                    .token1Decimals(pool.get("token1").get("decimals").asInt())
+                    .feeTier(pool.get("feeTier").asInt())
+                    .liquidity(new BigInteger(pool.get("liquidity").asText()))
+                    .sqrtPrice(new BigDecimal(pool.get("sqrtPrice").asText()))
+                    .tick(pool.get("tick").asInt())
+                    .volumeUSD(new BigDecimal(pool.get("volumeUSD").asText()))
+                    .feesUSD(new BigDecimal(pool.get("feesUSD").asText()))
+                    .totalValueLockedUSD(new BigDecimal(pool.get("totalValueLockedUSD").asText()))
+                    .build();
+        }
+        return null;
+    }
+
+    /**
+     * Get historical price data with pagination
+     */
+    public List<PriceDataPoint> getHistoricalPrices(String poolAddress,
+                                                    long startTime, long endTime, int limit) {
+
+        List<PriceDataPoint> allPrices = new ArrayList<>();
+        long currentTime = startTime;
+
+        while (currentTime < endTime && allPrices.size() < limit) {
+            String query = String.format(
+                    """
+                            {
+                              poolDayDatas(
+                                where: {
+                                  pool: "%s"
+                                  date_gte: %d
+                                  date_lt: %d
+                                }
+                                orderBy: date
+                                orderDirection: asc
+                                first: 1000
+                              ) {
+                                date
+                                high
+                                low
+                                open
+                                close
+                                volume
+                              }
+                            }
+                            """,
+                    poolAddress.toLowerCase(),
+                    currentTime,
+                    endTime
+            );
+
+            try {
+                JsonNode response = executeQueryWithRetries(query, 3);
+                List<PriceDataPoint> batch = parsePriceData(response);
+                allPrices.addAll(batch);
+
+                if (batch.isEmpty()) break;
+
+                // Update cursor for next query
+                currentTime = batch.get(batch.size() - 1).getTimestamp() + 1;
+
+            } catch (Exception e) {
+                log.error("Error fetching historical prices: {}", e.getMessage());
+                break;
+            }
+        }
+
+        return allPrices;
+    }
+
+    private List<PriceDataPoint> parsePriceData(JsonNode response) {
+        List<PriceDataPoint> prices = new ArrayList<>();
+
+        if (response != null && response.has("data") &&
+                response.get("data").has("poolDayDatas")) {
+
+            JsonNode dayDatas = response.get("data").get("poolDayDatas");
+
+            for (JsonNode day : dayDatas) {
+                try {
+                    PriceDataPoint point = PriceDataPoint.builder()
+                            .timestamp(day.get("date").asLong())
+                            .high(new BigDecimal(day.get("high").asText()))
+                            .low(new BigDecimal(day.get("low").asText()))
+                            .open(new BigDecimal(day.get("open").asText()))
+                            .close(new BigDecimal(day.get("close").asText()))
+                            .volume(new BigDecimal(day.get("volume").asText()))
+                            .build();
+
+                    prices.add(point);
+                } catch (Exception e) {
+                    log.warn("Error parsing price data point: {}", e.getMessage());
+                }
+            }
+        }
+
+        return prices;
+    }
+
+    @Getter
+    @Builder
+    public static class PoolInfo {
+        private final String token0Symbol;
+        private final String token1Symbol;
+        private final int token0Decimals;
+        private final int token1Decimals;
+        private final int feeTier;
+        private final BigInteger liquidity;
+        private final BigDecimal sqrtPrice;
+        private final int tick;
+        private final BigDecimal volumeUSD;
+        private final BigDecimal feesUSD;
+        private final BigDecimal totalValueLockedUSD;
+    }
+
+    @Getter
+    @Builder
+    public static class PriceDataPoint {
+        private final long timestamp;
+        private final BigDecimal high;
+        private final BigDecimal low;
+        private final BigDecimal open;
+        private final BigDecimal close;
+        private final BigDecimal volume;
+    }
+
+    public static class RetryableGraphQLException extends RuntimeException {
+        public RetryableGraphQLException(String message) {
+            super(message);
+        }
+    }
 }
+
+
